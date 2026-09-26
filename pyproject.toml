@@ -1,0 +1,20 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
+[project]
+name = "dbn"
+version = "0.1.0"
+description = "Dirty Bot Natured — ML library (JAX/MLX) for trading bots"
+readme = "README.md"
+requires-python = ">=3.12"
+dependencies = [
+    "jax>=0.4",
+    "mlx>=0.20",
+    "numpy>=1.26",
+    "tensorboard>=2.14",
+    "tqdm>=4.66",
+]
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/dbn"]
