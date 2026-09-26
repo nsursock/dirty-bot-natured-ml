@@ -13,7 +13,7 @@ import mlx.optimizers as optim
 import numpy as np
 from tqdm import tqdm
 
-from dbn.reinforcement.algos.common import (
+from dbn.reinforcement.common import (
     Logger,
     ReplayBuffer,
     SquashedGaussianActor,
@@ -22,6 +22,12 @@ from dbn.reinforcement.algos.common import (
     as_numpy,
     soft_update,
     space_info,
+)
+from dbn.reinforcement.losses import (
+    sac_actor_loss,
+    sac_alpha_loss,
+    sac_bellman_target,
+    sac_critic_loss,
 )
 
 
@@ -127,17 +133,15 @@ class SAC:
 
         def critic_loss_fn(model, obs, actions, target_q):
             q1, q2 = model(obs, actions)
-            loss = 0.5 * (mx.mean((q1 - target_q) ** 2) + mx.mean((q2 - target_q) ** 2))
-            return loss
+            return sac_critic_loss(q1, q2, target_q)
 
         def actor_loss_fn(model, obs, alpha, key):
             actions, logp = model(obs, key, deterministic=False)
             q1, q2 = critic(obs, actions)
-            loss = mx.mean(alpha * logp - mx.minimum(q1, q2))
-            return loss, logp
+            return sac_actor_loss(logp, q1, q2, alpha), logp
 
         def alpha_loss_fn(model, logp):
-            return -mx.mean(model.log_alpha * mx.stop_gradient(logp + target_entropy))
+            return sac_alpha_loss(model.log_alpha, logp, target_entropy)
 
         critic_vag = nn.value_and_grad(critic, critic_loss_fn)
         actor_vag = nn.value_and_grad(actor, actor_loss_fn)
@@ -150,7 +154,9 @@ class SAC:
 
             next_a, next_logp = actor(next_obs, k1, deterministic=False)
             q1_t, q2_t = critic_target(next_obs, next_a)
-            target_q = rewards + (1.0 - dones) * gamma * (mx.minimum(q1_t, q2_t) - alpha * next_logp)
+            target_q = sac_bellman_target(
+                rewards, dones, q1_t, q2_t, next_logp, alpha, gamma
+            )
 
             crit_loss, grads_c = critic_vag(critic, obs, actions, mx.stop_gradient(target_q))
             critic_opt.update(critic, grads_c)
@@ -220,9 +226,11 @@ class SAC:
         try:
             while self.num_timesteps < total_timesteps:
                 if self.num_timesteps < self.learning_starts:
-                    actions = np.stack(
-                        [np.asarray(self.env.action_space.sample(), dtype=np.float32) for _ in range(self.n_envs)]
+                    actions = np.asarray(
+                        self.env.action_space.sample(n=self.n_envs), dtype=np.float32
                     )
+                    if actions.ndim == 1:
+                        actions = actions.reshape(self.n_envs, -1)
                 else:
                     a_mx, _ = self.actor(mx.array(obs), self._next_key(), deterministic=False)
                     mx.eval(a_mx)
@@ -237,12 +245,15 @@ class SAC:
                 next_obs_np = self._obs_np(next_obs)
                 rewards = np.atleast_1d(np.asarray(rewards, dtype=np.float32))
                 dones = np.atleast_1d(np.asarray(dones, dtype=np.float32))
-                infos = infos if isinstance(infos, (list, tuple)) else [infos]
 
-                for i in range(self.n_envs):
-                    self.replay.add(obs[i], actions[i], rewards[i], next_obs_np[i], float(dones[i]))
-                    if isinstance(infos[i], dict) and "episode" in infos[i]:
-                        self._ep_info_buffer.append(infos[i]["episode"])
+                self.replay.add_batch(obs, actions, rewards, next_obs_np, dones)
+                if isinstance(infos, dict):
+                    if "episode" in infos:
+                        self._ep_info_buffer.append(infos["episode"])
+                else:
+                    for info in infos:
+                        if info and "episode" in info:
+                            self._ep_info_buffer.append(info["episode"])
 
                 obs = next_obs_np
                 self.num_timesteps += self.n_envs

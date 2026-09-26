@@ -1,0 +1,5 @@
+algo,env,n_envs,seeds,steps,train_fps_mean,train_fps_std,train_fps_min,train_fps_max,env_fps_mean,train_fps_per_env,env_fps_per_env,absolute_speedup,parallel_efficiency,incremental_efficiency,cpu_util_pct,gpu_util_pct,gpu_power_w,gpu_mem_mb,cpu_temp_c,gpu_temp_c
+PPO,CartPole,1024,5,1143603,568771.1,21414.7,545525.1,589471.7,1910821.0,555.4,1866.0,1.0,1.0,,6.1,69.5,0.221,4.3,54.7,45.3
+PPO,CartPole,2048,5,1505690,749214.9,20097.4,715935.4,765522.2,3380428.8,365.8,1650.6,1.317,0.659,0.659,5.8,68.8,0.258,4.2,57.6,48.5
+PPO,CartPole,4096,5,2280653,1137664.8,92335.6,979713.0,1212353.6,5658554.6,277.8,1381.5,2.0,0.5,0.759,4.9,69.7,0.327,7.8,56.9,49.5
+PPO,CartPole,8192,5,2552627,1274884.0,155581.0,1121561.9,1496104.4,8681345.7,155.6,1059.7,2.241,0.28,0.56,6.3,69.9,0.407,15.0,55.6,49.3

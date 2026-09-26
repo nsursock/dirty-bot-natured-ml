@@ -13,7 +13,7 @@ import mlx.optimizers as optim
 import numpy as np
 from tqdm import tqdm
 
-from dbn.reinforcement.algos.common import (
+from dbn.reinforcement.common import (
     Logger,
     MlpPolicy,
     RolloutBuffer,
@@ -28,6 +28,13 @@ from dbn.reinforcement.algos.common import (
     gaussian_sample,
     space_info,
     tree_flatten_dict,
+)
+from dbn.reinforcement.losses import (
+    normalize_advantages,
+    ppo_entropy_loss,
+    ppo_policy_loss,
+    ppo_ratio,
+    ppo_value_loss,
 )
 
 
@@ -134,7 +141,7 @@ class PPO:
 
         def loss_fn(model, obs, actions, old_logp, advantages, returns, old_values):
             if normalize_advantage:
-                advantages = (advantages - mx.mean(advantages)) / (mx.std(advantages) + 1e-8)
+                advantages = normalize_advantages(advantages)
             logits_or_mean, values = model(obs)
             if continuous:
                 logp = gaussian_log_prob(logits_or_mean, model.log_std, actions)
@@ -142,20 +149,10 @@ class PPO:
             else:
                 logp = categorical_log_prob(logits_or_mean, actions)
                 ent = categorical_entropy(logits_or_mean)
-            ratio = mx.exp(logp - old_logp)
-            pg1 = ratio * advantages
-            pg2 = mx.clip(ratio, 1.0 - clip_range, 1.0 + clip_range) * advantages
-            policy_loss = -mx.mean(mx.minimum(pg1, pg2))
-            if clip_range_vf is None:
-                value_loss = mx.mean((returns - values) ** 2)
-            else:
-                v_clipped = old_values + mx.clip(
-                    values - old_values, -clip_range_vf, clip_range_vf
-                )
-                value_loss = 0.5 * mx.mean(
-                    mx.maximum((returns - values) ** 2, (returns - v_clipped) ** 2)
-                )
-            entropy_loss = -mx.mean(ent)
+            ratio = ppo_ratio(logp, old_logp)
+            policy_loss = ppo_policy_loss(logp, old_logp, advantages, clip_range)
+            value_loss = ppo_value_loss(values, returns, old_values, clip_range_vf)
+            entropy_loss = ppo_entropy_loss(ent)
             loss = policy_loss + vf_coef * value_loss + ent_coef * entropy_loss
             approx_kl = mx.mean(old_logp - logp)
             clip_frac = mx.mean((mx.abs(ratio - 1.0) > clip_range).astype(mx.float32))
@@ -240,7 +237,7 @@ class PPO:
             self.buffer.add(obs, actions, rewards, dones, values, logp)
             self.num_timesteps += self.n_envs
             for info in infos:
-                if isinstance(info, dict) and "episode" in info:
+                if info and "episode" in info:
                     self._ep_info_buffer.append(info["episode"])
             obs = next_obs
         last_values = self.policy.value(obs)
@@ -357,5 +354,81 @@ class PPO:
 
     def save(self, path: str) -> None:
         assert self.policy is not None
+        path = path if path.endswith(".npz") else path + ".npz"
         weights = {k: np.array(v) for k, v in tree_flatten_dict(self.policy.parameters()).items()}
-        np.savez(path if path.endswith(".npz") else path + ".npz", **weights)
+        net_arch = list(self.policy_kwargs.get("net_arch", (64, 64)))
+        meta = {
+            "_obs_dim": np.array(self.obs_dim),
+            "_action_dim": np.array(self.action_dim),
+            "_continuous": np.array(int(self.continuous)),
+            "_learning_rate": np.array(self.learning_rate),
+            "_n_steps": np.array(self.n_steps),
+            "_batch_size": np.array(self.batch_size),
+            "_n_epochs": np.array(self.n_epochs),
+            "_gamma": np.array(self.gamma),
+            "_gae_lambda": np.array(self.gae_lambda),
+            "_clip_range": np.array(self.clip_range),
+            "_ent_coef": np.array(self.ent_coef),
+            "_vf_coef": np.array(self.vf_coef),
+            "_seed": np.array(-1 if self.seed is None else self.seed),
+            "_net_arch": np.array(net_arch, dtype=np.int64),
+            "_log_std_init": np.array(float(self.policy_kwargs.get("log_std_init", 0.0))),
+        }
+        np.savez(path, **weights, **meta)
+
+    @classmethod
+    def load(cls, path: str, env, **kwargs):
+        path = path if path.endswith(".npz") else path + ".npz"
+        data = np.load(path, allow_pickle=False)
+        files = set(data.files)
+
+        def _meta(name: str, default):
+            return data[name] if name in files else default
+
+        seed_raw = int(_meta("_seed", -1))
+        net_arch = tuple(int(x) for x in np.asarray(_meta("_net_arch", [64, 64])))
+        policy_kwargs = dict(kwargs.pop("policy_kwargs", {}) or {})
+        policy_kwargs.setdefault("net_arch", net_arch)
+        if "_log_std_init" in files:
+            policy_kwargs.setdefault("log_std_init", float(data["_log_std_init"]))
+        model = cls(
+            "MlpPolicy",
+            env,
+            learning_rate=float(_meta("_learning_rate", 3e-4)),
+            n_steps=int(_meta("_n_steps", 2048)),
+            batch_size=int(_meta("_batch_size", 64)),
+            n_epochs=int(_meta("_n_epochs", 10)),
+            gamma=float(_meta("_gamma", 0.99)),
+            gae_lambda=float(_meta("_gae_lambda", 0.95)),
+            clip_range=float(_meta("_clip_range", 0.2)),
+            ent_coef=float(_meta("_ent_coef", 0.0)),
+            vf_coef=float(_meta("_vf_coef", 0.5)),
+            seed=None if seed_raw < 0 else seed_raw,
+            policy_kwargs=policy_kwargs,
+            _init_setup_model=True,
+            **kwargs,
+        )
+        assert model.policy is not None
+        flat = tree_flatten_dict(model.policy.parameters())
+        loaded = {k: mx.array(data[k]) for k in flat if k in files}
+        if len(loaded) != len(flat):
+            missing = sorted(set(flat) - set(loaded))
+            raise KeyError(f"checkpoint missing parameters: {missing}")
+        params = model.policy.parameters()
+
+        def _set(tree, prefix=""):
+            if isinstance(tree, mx.array):
+                return loaded.get(prefix, tree)
+            if isinstance(tree, dict):
+                return {kk: _set(vv, f"{prefix}.{kk}" if prefix else str(kk)) for kk, vv in tree.items()}
+            if isinstance(tree, list):
+                return [_set(vv, f"{prefix}.{i}" if prefix else str(i)) for i, vv in enumerate(tree)]
+            if isinstance(tree, tuple):
+                return tuple(
+                    _set(vv, f"{prefix}.{i}" if prefix else str(i)) for i, vv in enumerate(tree)
+                )
+            return tree
+
+        model.policy.update(_set(params))
+        mx.eval(model.policy.parameters())
+        return model

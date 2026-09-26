@@ -13,7 +13,7 @@ import mlx.optimizers as optim
 import numpy as np
 from tqdm import tqdm
 
-from dbn.reinforcement.algos.common import (
+from dbn.reinforcement.common import (
     DeterministicActor,
     Logger,
     ReplayBuffer,
@@ -22,6 +22,12 @@ from dbn.reinforcement.algos.common import (
     as_numpy,
     soft_update,
     space_info,
+)
+from dbn.reinforcement.losses import (
+    td3_actor_loss,
+    td3_bellman_target,
+    td3_critic_loss,
+    td3_smooth_target_action,
 )
 
 
@@ -126,10 +132,10 @@ class TD3:
 
         def critic_loss_fn(model, obs, actions, target_q):
             q1, q2 = model(obs, actions)
-            return 0.5 * (mx.mean((q1 - target_q) ** 2) + mx.mean((q2 - target_q) ** 2))
+            return td3_critic_loss(q1, q2, target_q)
 
         def actor_loss_fn(model, obs):
-            return -mx.mean(critic(obs, model(obs))[0])
+            return td3_actor_loss(critic(obs, model(obs))[0])
 
         critic_vag = nn.value_and_grad(critic, critic_loss_fn)
         actor_vag = nn.value_and_grad(actor, actor_loss_fn)
@@ -138,14 +144,16 @@ class TD3:
         def critic_step(obs, actions, rewards, next_obs, dones, key):
             scale = mx.stop_gradient(actor_target.action_scale)
             bias = mx.stop_gradient(actor_target.action_bias)
-            noise = mx.clip(
-                mx.random.normal(key=key, shape=actions.shape) * noise_std,
-                -noise_clip,
-                noise_clip,
+            raw_noise = mx.random.normal(key=key, shape=actions.shape) * noise_std
+            next_a = td3_smooth_target_action(
+                actor_target(next_obs),
+                raw_noise,
+                noise_clip=noise_clip,
+                action_scale=scale,
+                action_bias=bias,
             )
-            next_a = mx.clip(actor_target(next_obs) + noise * scale, bias - scale, bias + scale)
             q1_t, q2_t = critic_target(next_obs, next_a)
-            target_q = rewards + (1.0 - dones) * gamma * mx.minimum(q1_t, q2_t)
+            target_q = td3_bellman_target(rewards, dones, q1_t, q2_t, gamma)
             loss, grads = critic_vag(critic, obs, actions, mx.stop_gradient(target_q))
             critic_opt.update(critic, grads)
             return loss
@@ -214,12 +222,11 @@ class TD3:
         try:
             while self.num_timesteps < total_timesteps:
                 if self.num_timesteps < self.learning_starts:
-                    actions = np.stack(
-                        [
-                            np.asarray(self.env.action_space.sample(), dtype=np.float32)
-                            for _ in range(self.n_envs)
-                        ]
+                    actions = np.asarray(
+                        self.env.action_space.sample(n=self.n_envs), dtype=np.float32
                     )
+                    if actions.ndim == 1:
+                        actions = actions.reshape(self.n_envs, -1)
                 else:
                     a_mx = self.actor(mx.array(obs))
                     noise = (
@@ -244,12 +251,15 @@ class TD3:
                 next_obs_np = self._obs_np(next_obs)
                 rewards = np.atleast_1d(np.asarray(rewards, dtype=np.float32))
                 dones = np.atleast_1d(np.asarray(dones, dtype=np.float32))
-                infos = infos if isinstance(infos, (list, tuple)) else [infos]
 
-                for i in range(self.n_envs):
-                    self.replay.add(obs[i], actions[i], rewards[i], next_obs_np[i], float(dones[i]))
-                    if isinstance(infos[i], dict) and "episode" in infos[i]:
-                        self._ep_info_buffer.append(infos[i]["episode"])
+                self.replay.add_batch(obs, actions, rewards, next_obs_np, dones)
+                if isinstance(infos, dict):
+                    if "episode" in infos:
+                        self._ep_info_buffer.append(infos["episode"])
+                else:
+                    for info in infos:
+                        if info and "episode" in info:
+                            self._ep_info_buffer.append(info["episode"])
 
                 obs = next_obs_np
                 self.num_timesteps += self.n_envs

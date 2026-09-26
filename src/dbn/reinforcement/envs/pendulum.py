@@ -39,6 +39,9 @@ def _obs_from_state(state: mx.array) -> mx.array:
     return mx.stack([mx.cos(theta), mx.sin(theta), theta_dot], axis=-1)
 
 
+_EMPTY_INFO: dict = {}
+
+
 class Pendulum:
     """
     Gymnasium-like Pendulum-v1.
@@ -109,14 +112,21 @@ class Pendulum:
         self._ep_ret += rew_np
         self._ep_len += 1
 
-        infos: list[dict] = []
-        for i in range(self.n_envs):
+        if self.n_envs == 1:
             info: dict = {}
-            if done_np[i]:
-                info["episode"] = {"r": float(self._ep_ret[i]), "l": int(self._ep_len[i])}
-                self._ep_ret[i] = 0.0
-                self._ep_len[i] = 0
-            infos.append(info)
+            if done_np[0]:
+                info["episode"] = {"r": float(self._ep_ret[0]), "l": int(self._ep_len[0])}
+                self._ep_ret[0] = 0.0
+                self._ep_len[0] = 0
+            infos: list[dict] | dict = info
+        else:
+            infos = [_EMPTY_INFO] * self.n_envs
+            if done_np.any():
+                infos = list(infos)
+                for i in np.flatnonzero(done_np):
+                    infos[i] = {"episode": {"r": float(self._ep_ret[i]), "l": int(self._ep_len[i])}}
+                self._ep_ret[done_np] = 0.0
+                self._ep_len[done_np] = 0
 
         if np.any(done_np):
             fresh = self._sample_state()
@@ -129,5 +139,5 @@ class Pendulum:
         obs = np.array(_obs_from_state(self._state), dtype=np.float32)
 
         if self.n_envs == 1:
-            return obs[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos[0]
+            return obs[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos
         return obs, rew_np, term_np, trunc_np, infos

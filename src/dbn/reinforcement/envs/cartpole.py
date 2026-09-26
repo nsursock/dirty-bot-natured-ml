@@ -50,6 +50,9 @@ def _cartpole_step(state: mx.array, action: mx.array) -> tuple[mx.array, mx.arra
 _step_compiled = mx.compile(_cartpole_step)
 
 
+_EMPTY_INFO: dict = {}
+
+
 class CartPole:
     """
     Gymnasium-like CartPole.
@@ -119,14 +122,22 @@ class CartPole:
         self._ep_ret += rew_np
         self._ep_len += 1
 
-        infos: list[dict] = []
-        for i in range(self.n_envs):
+        if self.n_envs == 1:
             info: dict = {}
-            if done_np[i]:
-                info["episode"] = {"r": float(self._ep_ret[i]), "l": int(self._ep_len[i])}
-                self._ep_ret[i] = 0.0
-                self._ep_len[i] = 0
-            infos.append(info)
+            if done_np[0]:
+                info["episode"] = {"r": float(self._ep_ret[0]), "l": int(self._ep_len[0])}
+                self._ep_ret[0] = 0.0
+                self._ep_len[0] = 0
+            infos: list[dict] | dict = info
+        else:
+            # Shared empty sentinel — avoid allocating n_envs dicts every step.
+            infos = [_EMPTY_INFO] * self.n_envs
+            if done_np.any():
+                infos = list(infos)
+                for i in np.flatnonzero(done_np):
+                    infos[i] = {"episode": {"r": float(self._ep_ret[i]), "l": int(self._ep_len[i])}}
+                self._ep_ret[done_np] = 0.0
+                self._ep_len[done_np] = 0
 
         # auto-reset finished envs (VecEnv-style)
         if np.any(done_np):
@@ -140,5 +151,5 @@ class CartPole:
         obs = np.array(self._state, dtype=np.float32)
 
         if self.n_envs == 1:
-            return obs[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos[0]
+            return obs[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos
         return obs, rew_np, term_np, trunc_np, infos

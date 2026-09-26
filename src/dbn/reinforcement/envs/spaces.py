@@ -18,10 +18,15 @@ class Box:
             self.high = np.full(shape, high, dtype=dtype)
         self.shape = tuple(shape)
         self.dtype = dtype
+        self._rng = np.random.default_rng()
 
-    def sample(self, rng: np.random.Generator | None = None):
-        rng = rng or np.random.default_rng()
-        return rng.uniform(self.low, self.high).astype(self.dtype)
+    def sample(self, rng: np.random.Generator | None = None, n: int | None = None):
+        """Sample one action, or a batch of ``n`` actions with shape (n, *shape)."""
+        rng = rng or self._rng
+        if n is None:
+            return rng.uniform(self.low, self.high).astype(self.dtype)
+        size = (int(n),) + self.shape
+        return rng.uniform(self.low, self.high, size=size).astype(self.dtype)
 
 
 class Discrete:
@@ -29,7 +34,10 @@ class Discrete:
         self.n = int(n)
         self.shape = ()
         self.dtype = np.int64
+        self._rng = np.random.default_rng()
 
-    def sample(self, rng: np.random.Generator | None = None) -> int:
-        rng = rng or np.random.default_rng()
-        return int(rng.integers(0, self.n))
+    def sample(self, rng: np.random.Generator | None = None, n: int | None = None):
+        rng = rng or self._rng
+        if n is None:
+            return int(rng.integers(0, self.n))
+        return rng.integers(0, self.n, size=int(n), dtype=self.dtype)

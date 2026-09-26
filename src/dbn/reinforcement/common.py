@@ -379,6 +379,46 @@ class ReplayBuffer:
         self.pos = (self.pos + 1) % self.capacity
         self.size = min(self.size + 1, self.capacity)
 
+    def add_batch(self, obs, actions, rewards, next_obs, dones) -> None:
+        """Vectorized insert of a batch of transitions (handles wraparound)."""
+        obs = np.asarray(obs, dtype=np.float32).reshape(-1, self.obs.shape[-1])
+        next_obs = np.asarray(next_obs, dtype=np.float32).reshape(-1, self.next_obs.shape[-1])
+        actions = np.asarray(actions, dtype=np.float32).reshape(-1, self.actions.shape[-1])
+        rewards = np.asarray(rewards, dtype=np.float32).reshape(-1)
+        dones = np.asarray(dones, dtype=np.float32).reshape(-1)
+        n = int(obs.shape[0])
+        if n == 0:
+            return
+        if n > self.capacity:
+            # keep only the most recent `capacity` transitions
+            obs, next_obs = obs[-self.capacity :], next_obs[-self.capacity :]
+            actions, rewards, dones = actions[-self.capacity :], rewards[-self.capacity :], dones[-self.capacity :]
+            n = self.capacity
+
+        end = self.pos + n
+        if end <= self.capacity:
+            sl = slice(self.pos, end)
+            self.obs[sl] = obs
+            self.next_obs[sl] = next_obs
+            self.actions[sl] = actions
+            self.rewards[sl] = rewards
+            self.dones[sl] = dones
+        else:
+            first = self.capacity - self.pos
+            self.obs[self.pos :] = obs[:first]
+            self.next_obs[self.pos :] = next_obs[:first]
+            self.actions[self.pos :] = actions[:first]
+            self.rewards[self.pos :] = rewards[:first]
+            self.dones[self.pos :] = dones[:first]
+            rest = n - first
+            self.obs[:rest] = obs[first:]
+            self.next_obs[:rest] = next_obs[first:]
+            self.actions[:rest] = actions[first:]
+            self.rewards[:rest] = rewards[first:]
+            self.dones[:rest] = dones[first:]
+        self.pos = (self.pos + n) % self.capacity
+        self.size = min(self.size + n, self.capacity)
+
     def sample(self, batch_size: int) -> dict[str, mx.array]:
         idx = np.random.randint(0, self.size, size=batch_size)
         return {

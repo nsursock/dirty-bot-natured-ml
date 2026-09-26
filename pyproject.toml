@@ -16,5 +16,18 @@ dependencies = [
     "tqdm>=4.66",
 ]
 
+[project.optional-dependencies]
+dev = ["pytest>=8.0", "tabulate>=0.9", "psutil>=5.9"]
+
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbn"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["src", "."]
+addopts = "-q"
+filterwarnings = ["ignore::DeprecationWarning"]
+markers = [
+    "smoke: short training smoke tests",
+    "slow: longer (still CI-safe) improvement checks",
+]
