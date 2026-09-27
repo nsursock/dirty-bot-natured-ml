@@ -34,6 +34,21 @@ def test_cartpole_reset_step_shapes_vector():
     assert len(info2) == 4
 
 
+def test_pendulum_reward_wraps_full_turns():
+    """A full rotation is upright: cost uses angle in [-π, π], not the raw θ."""
+    import math
+
+    import mlx.core as mx
+
+    env = Pendulum(n_envs=1, seed=0)
+    env.reset()
+    env._state = mx.array([[2.0 * math.pi, 0.0]], dtype=mx.float32)
+    env._steps = mx.zeros((1,), dtype=mx.int32)
+    _, reward, _, _, _ = env.step(np.array([0.0], dtype=np.float32))
+    # Wrapped θ≈0 → cost near 0. Unwrapped (2π)² would be ~39.5.
+    assert reward > -1.0
+
+
 def test_pendulum_action_and_obs_bounds():
     env = Pendulum(n_envs=1, seed=1)
     obs, _ = env.reset()

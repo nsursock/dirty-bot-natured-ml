@@ -17,11 +17,18 @@ _M = 1.0
 _L = 1.0
 
 
+def _angle_normalize(theta: mx.array) -> mx.array:
+    """Wrap θ into [-π, π], matching Gymnasium Pendulum-v1's cost."""
+    two_pi = 2.0 * math.pi
+    return theta - two_pi * mx.floor((theta + math.pi) / two_pi)
+
+
 def _pendulum_step(state: mx.array, action: mx.array) -> tuple[mx.array, mx.array]:
     """state (N,2)=[theta, theta_dot], action (N,1) → next_state, reward."""
     theta, theta_dot = state[:, 0], state[:, 1]
     u = mx.clip(action[:, 0], -_MAX_TORQUE, _MAX_TORQUE)
-    reward = -(theta**2 + 0.1 * theta_dot**2 + 0.001 * (u**2))
+    # Cost uses the wrapped angle. State stays unwrapped so dynamics stay continuous.
+    reward = -(_angle_normalize(theta) ** 2 + 0.1 * theta_dot**2 + 0.001 * (u**2))
     new_dot = theta_dot + (
         3.0 * _G / (2.0 * _L) * mx.sin(theta) + 3.0 / (_M * _L**2) * u
     ) * _DT
