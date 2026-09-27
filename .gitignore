@@ -1,7 +1,13 @@
+# Python
 .venv/
 __pycache__/
 *.egg-info/
 dist/
 build/
 
+# MacOS
+.DS_Store
+
+# Project specific
 outputs/
+
