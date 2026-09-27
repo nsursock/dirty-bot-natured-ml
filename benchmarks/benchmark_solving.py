@@ -10,7 +10,7 @@ Sweep: n_envs = 4, 8, 16, …, 8192. Env-step budget scales with n_envs
 Run:
   python benchmarks/benchmark_solving.py
   python benchmarks/benchmark_solving.py --algo ppo --seeds 1
-  python benchmarks/benchmark_solving.py --base-budget 250000 --csv benchmarks/solving_results.csv
+  python benchmarks/benchmark_solving.py --base-budget 250000 --csv outputs/solving_results.csv
 """
 
 from __future__ import annotations
@@ -427,7 +427,7 @@ def parse_args() -> argparse.Namespace:
         default=CHUNK_STEPS,
         help="minimum env-steps between solve checks (also ≥ n_envs * max_ep_len)",
     )
-    p.add_argument("--csv", type=Path, default=Path("benchmarks/solving_results.csv"))
+    p.add_argument("--csv", type=Path, default=Path("outputs/solving_results.csv"))
     p.add_argument(
         "--raw-csv",
         type=Path,

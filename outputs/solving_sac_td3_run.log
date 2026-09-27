@@ -1,0 +1,93 @@
+solve window=100 episodes | thresholds={'CartPole': 475.0, 'Pendulum': -150.0}
+n_envs=[4, 8, 16, 32, 64, 128, 256, 512, 1024, 2048, 4096, 8192] | base_budget=250000 (at n_envs=4) | budgets={4: 250000, 8: 500000, 16: 1000000, 32: 2000000, 64: 4000000, 128: 8000000, 256: 16000000, 512: 32000000, 1024: 64000000, 2048: 128000000, 4096: 256000000, 8192: 512000000}
+resume: skipping 12 completed runs from benchmarks/solving_results_raw.csv
+  SAC Pendulum n_envs=4 seed=0 (solve>=-150.0, budget=250000, chunk=4096) ...
+    → SOLVED steps=57344 elapsed_s=67.0 ep_rew=-147.2 n_eps=100
+  SAC Pendulum n_envs=8 seed=0 (solve>=-150.0, budget=500000, chunk=4096) ...
+    → SOLVED steps=65536 elapsed_s=31.9 ep_rew=-148.1 n_eps=100
+  SAC Pendulum n_envs=16 seed=0 (solve>=-150.0, budget=1000000, chunk=4096) ...
+    → SOLVED steps=106496 elapsed_s=24.4 ep_rew=-147.1 n_eps=100
+  SAC Pendulum n_envs=32 seed=0 (solve>=-150.0, budget=2000000, chunk=6400) ...
+    → SOLVED steps=275200 elapsed_s=35.3 ep_rew=-148.4 n_eps=100
+  SAC Pendulum n_envs=64 seed=0 (solve>=-150.0, budget=4000000, chunk=12800) ...
+    → SOLVED steps=806400 elapsed_s=34.6 ep_rew=-141.4 n_eps=100
+  SAC Pendulum n_envs=128 seed=0 (solve>=-150.0, budget=8000000, chunk=25600) ...
+    → SOLVED steps=1561600 elapsed_s=51.9 ep_rew=-144.4 n_eps=100
+  SAC Pendulum n_envs=256 seed=0 (solve>=-150.0, budget=16000000, chunk=51200) ...
+    → SOLVED steps=2457600 elapsed_s=38.9 ep_rew=-138.5 n_eps=100
+  SAC Pendulum n_envs=512 seed=0 (solve>=-150.0, budget=32000000, chunk=102400) ...
+    → SOLVED steps=5836800 elapsed_s=56.0 ep_rew=-149.2 n_eps=100
+  SAC Pendulum n_envs=1024 seed=0 (solve>=-150.0, budget=64000000, chunk=204800) ...
+    → SOLVED steps=9011200 elapsed_s=44.0 ep_rew=-143.8 n_eps=100
+  SAC Pendulum n_envs=2048 seed=0 (solve>=-150.0, budget=128000000, chunk=409600) ...
+    → SOLVED steps=24166400 elapsed_s=65.7 ep_rew=-149.6 n_eps=100
+  SAC Pendulum n_envs=4096 seed=0 (solve>=-150.0, budget=256000000, chunk=819200) ...
+    → SOLVED steps=45056000 elapsed_s=71.5 ep_rew=-144.1 n_eps=100
+  SAC Pendulum n_envs=8192 seed=0 (solve>=-150.0, budget=512000000, chunk=1638400) ...
+    → SOLVED steps=104857600 elapsed_s=105.5 ep_rew=-149.6 n_eps=100
+  TD3 Pendulum n_envs=4 seed=0 (solve>=-150.0, budget=250000, chunk=4096) ...
+    → FAIL steps=65536 elapsed_s=33.5 ep_rew=-1409.9 n_eps=100
+  TD3 Pendulum n_envs=8 seed=0 (solve>=-150.0, budget=500000, chunk=4096) ...
+    → SOLVED steps=69632 elapsed_s=16.4 ep_rew=-145.6 n_eps=100
+  TD3 Pendulum n_envs=16 seed=0 (solve>=-150.0, budget=1000000, chunk=4096) ...
+    → SOLVED steps=147456 elapsed_s=19.1 ep_rew=-148.8 n_eps=100
+  TD3 Pendulum n_envs=32 seed=0 (solve>=-150.0, budget=2000000, chunk=6400) ...
+    → FAIL steps=505600 elapsed_s=32.6 ep_rew=-1467.3 n_eps=100
+  TD3 Pendulum n_envs=64 seed=0 (solve>=-150.0, budget=4000000, chunk=12800) ...
+    → SOLVED steps=806400 elapsed_s=26.6 ep_rew=-146.1 n_eps=100
+  TD3 Pendulum n_envs=128 seed=0 (solve>=-150.0, budget=8000000, chunk=25600) ...
+    → SOLVED steps=1024000 elapsed_s=16.6 ep_rew=-141.2 n_eps=100
+  TD3 Pendulum n_envs=256 seed=0 (solve>=-150.0, budget=16000000, chunk=51200) ...
+    → SOLVED steps=2457600 elapsed_s=20.7 ep_rew=-141.0 n_eps=100
+  TD3 Pendulum n_envs=512 seed=0 (solve>=-150.0, budget=32000000, chunk=102400) ...
+    → SOLVED steps=3584000 elapsed_s=18.7 ep_rew=-145.0 n_eps=100
+  TD3 Pendulum n_envs=1024 seed=0 (solve>=-150.0, budget=64000000, chunk=204800) ...
+    → SOLVED steps=7782400 elapsed_s=24.6 ep_rew=-148.1 n_eps=100
+  TD3 Pendulum n_envs=2048 seed=0 (solve>=-150.0, budget=128000000, chunk=409600) ...
+    → FAIL steps=32358400 elapsed_s=72.0 ep_rew=-1447.1 n_eps=100
+  TD3 Pendulum n_envs=4096 seed=0 (solve>=-150.0, budget=256000000, chunk=819200) ...
+    → SOLVED steps=34406400 elapsed_s=50.8 ep_rew=-143.4 n_eps=100
+  TD3 Pendulum n_envs=8192 seed=0 (solve>=-150.0, budget=512000000, chunk=1638400) ...
+    → FAIL steps=129433600 elapsed_s=124.7 ep_rew=-847.3 n_eps=100
+
+| algo   | env      |   n_envs |    budget |   solve_rate |       steps_mean |   steps_std |   elapsed_s_mean |   ep_rew_mean |
+|--------|----------|----------|-----------|--------------|------------------|-------------|------------------|---------------|
+| PPO    | CartPole |        4 |    250000 |            1 | 122880           |           0 |            29.01 |         476.2 |
+| PPO    | CartPole |        8 |    500000 |            1 |  94208           |           0 |            15    |         478.6 |
+| PPO    | CartPole |       16 |   1000000 |            1 |  90112           |           0 |            10.65 |         486.3 |
+| PPO    | CartPole |       32 |   2000000 |            1 |  98304           |           0 |             9.96 |         492.2 |
+| PPO    | CartPole |       64 |   4000000 |            1 |  98304           |           0 |             8.89 |         500   |
+| PPO    | CartPole |      128 |   8000000 |            1 | 131072           |           0 |            11.46 |         500   |
+| PPO    | CartPole |      256 |  16000000 |            1 | 262144           |           0 |            22.19 |         500   |
+| PPO    | CartPole |      512 |  32000000 |            1 | 524288           |           0 |            43.66 |         500   |
+| PPO    | CartPole |     1024 |  64000000 |            1 |      1.03219e+06 |           0 |            86.04 |         500   |
+| PPO    | CartPole |     2048 | 128000000 |            1 |      2.048e+06   |           0 |           170.19 |         500   |
+| PPO    | CartPole |     4096 | 256000000 |            1 |      4.096e+06   |           0 |           338.87 |         500   |
+| PPO    | CartPole |     8192 | 512000000 |            1 |      4.096e+06   |           0 |           338.33 |         500   |
+| SAC    | Pendulum |        4 |    250000 |            1 |  57344           |           0 |            67.04 |        -147.2 |
+| SAC    | Pendulum |        8 |    500000 |            1 |  65536           |           0 |            31.94 |        -148.1 |
+| SAC    | Pendulum |       16 |   1000000 |            1 | 106496           |           0 |            24.42 |        -147.1 |
+| SAC    | Pendulum |       32 |   2000000 |            1 | 275200           |           0 |            35.28 |        -148.4 |
+| SAC    | Pendulum |       64 |   4000000 |            1 | 806400           |           0 |            34.56 |        -141.4 |
+| SAC    | Pendulum |      128 |   8000000 |            1 |      1.5616e+06  |           0 |            51.91 |        -144.4 |
+| SAC    | Pendulum |      256 |  16000000 |            1 |      2.4576e+06  |           0 |            38.86 |        -138.6 |
+| SAC    | Pendulum |      512 |  32000000 |            1 |      5.8368e+06  |           0 |            56.04 |        -149.2 |
+| SAC    | Pendulum |     1024 |  64000000 |            1 |      9.0112e+06  |           0 |            43.97 |        -143.8 |
+| SAC    | Pendulum |     2048 | 128000000 |            1 |      2.41664e+07 |           0 |            65.69 |        -149.6 |
+| SAC    | Pendulum |     4096 | 256000000 |            1 |      4.5056e+07  |           0 |            71.45 |        -144.1 |
+| SAC    | Pendulum |     8192 | 512000000 |            1 |      1.04858e+08 |           0 |           105.54 |        -149.7 |
+| TD3    | Pendulum |        4 |    250000 |            0 |                  |             |                  |       -1409.9 |
+| TD3    | Pendulum |        8 |    500000 |            1 |  69632           |           0 |            16.37 |        -145.6 |
+| TD3    | Pendulum |       16 |   1000000 |            1 | 147456           |           0 |            19.11 |        -148.8 |
+| TD3    | Pendulum |       32 |   2000000 |            0 |                  |             |                  |       -1467.3 |
+| TD3    | Pendulum |       64 |   4000000 |            1 | 806400           |           0 |            26.58 |        -146.1 |
+| TD3    | Pendulum |      128 |   8000000 |            1 |      1.024e+06   |           0 |            16.64 |        -141.2 |
+| TD3    | Pendulum |      256 |  16000000 |            1 |      2.4576e+06  |           0 |            20.72 |        -141   |
+| TD3    | Pendulum |      512 |  32000000 |            1 |      3.584e+06   |           0 |            18.71 |        -145.1 |
+| TD3    | Pendulum |     1024 |  64000000 |            1 |      7.7824e+06  |           0 |            24.58 |        -148.1 |
+| TD3    | Pendulum |     2048 | 128000000 |            0 |                  |             |                  |       -1447.1 |
+| TD3    | Pendulum |     4096 | 256000000 |            1 |      3.44064e+07 |           0 |            50.8  |        -143.4 |
+| TD3    | Pendulum |     8192 | 512000000 |            0 |                  |             |                  |        -847.3 |
+
+wrote benchmarks/solving_results.csv
+wrote benchmarks/solving_results_raw.csv

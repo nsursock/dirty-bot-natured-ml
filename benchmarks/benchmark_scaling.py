@@ -11,7 +11,7 @@ Design (pure scaling + stable timing):
 Run:
   python benchmarks/benchmark_scaling.py
   python benchmarks/benchmark_scaling.py --algo ppo --n-envs 1024 2048 4096 8192 --seeds 5
-  python benchmarks/benchmark_scaling.py --min-seconds 2 --csv benchmarks/scaling_results.csv
+  python benchmarks/benchmark_scaling.py --min-seconds 2 --csv outputs/scaling_results.csv
 """
 
 from __future__ import annotations
@@ -791,7 +791,7 @@ def parse_args() -> argparse.Namespace:
         help="minimum wall-clock seconds per timed measurement (default 2.0)",
     )
     p.add_argument("--seeds", type=int, default=DEFAULT_SEEDS, help="seeds per (algo, n_envs)")
-    p.add_argument("--csv", type=Path, default=Path("benchmarks/scaling_results.csv"))
+    p.add_argument("--csv", type=Path, default=Path("outputs/scaling_results.csv"))
     p.add_argument(
         "--raw-csv",
         type=Path,
@@ -803,7 +803,7 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="skip powermetrics GPU util/power sampling",
     )
-    p.add_argument("--out-dir", type=Path, default=Path("benchmarks/profiles"))
+    p.add_argument("--out-dir", type=Path, default=Path("outputs/profiles"))
     p.add_argument("--top", type=int, default=40)
     return p.parse_args()
 

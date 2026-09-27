@@ -18,6 +18,7 @@ dependencies = [
 
 [project.optional-dependencies]
 dev = ["pytest>=8.0", "tabulate>=0.9", "psutil>=5.9"]
+bench = ["optuna>=3.6"]
 
 [tool.hatch.build.targets.wheel]
 packages = ["src/dbn"]
