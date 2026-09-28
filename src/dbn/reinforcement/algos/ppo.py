@@ -6,6 +6,7 @@ from collections import deque
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
+import time
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -280,7 +281,7 @@ class PPO:
     def _train(self) -> dict[str, float]:
         assert self.buffer is not None and self._compiled_update is not None
         totals = {
-            "policy_gradient_loss": 0.0,
+            "policy_loss": 0.0,
             "value_loss": 0.0,
             "entropy_loss": 0.0,
             "approx_kl": 0.0,
@@ -304,7 +305,7 @@ class PPO:
                 mx.eval(loss, *metrics, self.policy.parameters(), self.optimizer.state)
                 pl, vl, el, kl, cf = metrics
                 totals["loss"] += float(loss)
-                totals["policy_gradient_loss"] += float(pl)
+                totals["policy_loss"] += float(pl)
                 totals["value_loss"] += float(vl)
                 totals["entropy_loss"] += float(el)
                 totals["approx_kl"] += float(kl)
@@ -328,6 +329,8 @@ class PPO:
             self.num_timesteps = 0
         if self.tensorboard_log is not None and self._logger is None:
             self._logger = Logger(Path(self.tensorboard_log) / f"{tb_log_name}_1")
+
+        train_start = time.time()
 
         obs, _ = self._reset_env()
         iteration = 0
@@ -371,10 +374,19 @@ class PPO:
                     "train/explained_variance": ev,
                     "train/n_updates": float(self._n_updates),
                     "train/learning_rate": float(self.learning_rate),
+                    "train/std": (
+                        float(mx.mean(mx.exp(self.policy.log_std)))
+                        if self.continuous
+                        else 0.0
+                    ),
                 }
                 if self._ep_info_buffer:
                     metrics["rollout/ep_rew_mean"] = ep_rew
                     metrics["rollout/ep_len_mean"] = ep_len
+                elapsed = time.time() - train_start
+                metrics["time/total_timesteps"] = float(self.num_timesteps)
+                metrics["time/time_elapsed"] = elapsed
+                metrics["time/fps"] = float(self.num_timesteps) / max(elapsed, 1e-6)
                 if self._logger is not None and iteration % log_interval == 0:
                     self._logger.record(metrics, self.num_timesteps)
                     self._logger.flush()
