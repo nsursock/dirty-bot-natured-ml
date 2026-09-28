@@ -6,8 +6,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from dbn.reinforcement.losses import ppo_ratio
 from dbn.reinforcement.algos.ppo import PPO
+from dbn.reinforcement.common import ppo_ratio
 from dbn.reinforcement.envs import CartPole, Pendulum
 
 
@@ -90,3 +90,23 @@ def test_ppo_vec_env(cartpole_vec):
     model.learn(64, progress_bar=False)
     assert model.n_envs == 4
     assert model.num_timesteps >= 64
+
+
+def test_ppo_truncation_terminal_values_used():
+    env = Pendulum(n_envs=1, max_episode_steps=2, seed=0)
+    model = PPO(
+        "MlpPolicy",
+        env,
+        n_steps=2,
+        batch_size=2,
+        n_epochs=1,
+        policy_kwargs={"net_arch": (8,)},
+        seed=0,
+    )
+    obs, _ = model._reset_env()
+    model._collect_rollouts(obs)
+    assert model.buffer is not None
+    truncs = np.array(model.buffer.truncations)
+    tvals = np.array(model.buffer.terminal_values)
+    assert truncs.max() > 0
+    assert np.any(np.abs(tvals) > 0)

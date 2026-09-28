@@ -12,11 +12,10 @@ A smoke run (``--trials 1``) checks the loop only. Pruning needs
 ``n_startup_trials`` completed trials first (default 3), so one trial
 cannot be pruned.
 
-The default grid stops at 2 hours of wall clock. Each trial gets an equal
-share of the time still left, and fast trials donate the rest to later
-ones. A trial stopped by that share is ``time_capped``: elapsed time is
-the measured partial run, and the objective is left blank so a short cap
-is not ranked as a fast solve. ``--max-hours 0`` disables the cap.
+The default grid stops starting new trials after 2 hours of wall clock.
+A trial already in flight always finishes its current training run normally;
+``--max-hours 0`` disables the cap. Existing studies resume by default, while
+``--no-resume`` deletes the selected algorithms' study databases first.
 
 Run:
   python benchmarks/benchmark_hpo.py --algo ppo --n-envs 4 8 --trials 1 --seed 0
@@ -28,6 +27,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import signal
 import sys
 import time
 import urllib.parse
@@ -61,6 +61,18 @@ except ImportError:  # pragma: no cover - import guard for missing extra
     optuna = None
     TrialPruned = Exception  # type: ignore[misc, assignment]
     MedianPruner = None  # type: ignore[misc, assignment]
+
+_shutdown_requested = False
+
+
+def _request_shutdown(signum, frame):
+    global _shutdown_requested
+    _shutdown_requested = True
+    tqdm.write("\nshutdown requested: finishing current trial and saving state...")
+
+
+signal.signal(signal.SIGINT, _request_shutdown)
+signal.signal(signal.SIGTERM, _request_shutdown)
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
 DEFAULT_MAX_HOURS = 2.0
@@ -172,6 +184,20 @@ def _append_csv(path: Path, row: dict, columns: tuple[str, ...]) -> None:
             writer.writeheader()
         writer.writerow({c: row.get(c, "") for c in columns})
         f.flush()
+
+
+def _count_trial_states(db_path: Path, study_name: str) -> dict[str, int]:
+    if optuna is None or not db_path.exists():
+        return {}
+    try:
+        storage = "sqlite:///" + urllib.parse.quote(db_path.as_posix(), safe="/")
+        study = optuna.load_study(study_name=study_name, storage=storage)
+        return {
+            state.name: sum(1 for t in study.trials if t.state == state)
+            for state in optuna.trial.TrialState
+        }
+    except Exception:
+        return {}
 
 
 def _progress(ep_rew: float, baseline: float, threshold: float) -> float:
@@ -311,13 +337,6 @@ class _WallClock:
     def expired(self) -> bool:
         return self.schedule is not None and time.perf_counter() >= self.schedule
 
-    def trial_deadline(self) -> float:
-        if self.schedule is None:
-            return float("inf")
-        now = time.perf_counter()
-        share = max(0.0, self.schedule - now) / max(self.left, 1)
-        return now + share
-
     def pop(self) -> None:
         self.left = max(0, self.left - 1)
 
@@ -333,7 +352,6 @@ def _run_trial(
     threshold: float,
     chunk_csv: Path,
     trial_csv: Path,
-    trial_deadline: float,
 ) -> float:
     params = _sample(trial, algo, n_envs_choices)
     n_envs = int(params["n_envs"])
@@ -360,9 +378,6 @@ def _run_trial(
 
     try:
         while model.num_timesteps < budget:
-            if time.perf_counter() >= trial_deadline:
-                time_capped = True
-                break
             steps_at_start = int(model.num_timesteps)
             target = min(budget, model.num_timesteps + chunk)
             model.learn(
@@ -376,7 +391,10 @@ def _run_trial(
             eval_rew = _eval_mean_reward(model, env_name, seed, N_EVAL_EPISODES)
             elapsed = time.perf_counter() - t0
             bar.update(max(0, int(model.num_timesteps) - steps_at_start))
-            bar.set_postfix(rew=f"{eval_rew:.1f}" if np.isfinite(eval_rew) else "-")
+            bar.set_postfix(
+                trial=trial.number,
+                eval_rew=f"{eval_rew:.1f}" if np.isfinite(eval_rew) else "-",
+            )
             progress = _progress(eval_rew, baseline, threshold)
             _append_csv(
                 chunk_csv,
@@ -405,20 +423,24 @@ def _run_trial(
             if trial.should_prune():
                 pruned = True
                 raise TrialPruned()
+            if _shutdown_requested:
+                time_capped = True
+                break
             chunk_idx += 1
     finally:
         bar.close()
         elapsed = time.perf_counter() - t0
         steps_at_stop = int(model.num_timesteps)
-        objective: float | str
-        if pruned or time_capped:
-            objective = ""
-        elif solved:
+        objective: float
+        if solved:
             objective = round(elapsed, 4)
         else:
-            # Penalize unsolved trials by extrapolating elapsed time to the full budget.
+            # Penalize unsolved/pruned/capped trials by extrapolating elapsed time
+            # to the full budget. Capped trials get an extra-large penalty.
             per_step = elapsed / max(steps_at_stop, 1)
             objective = round(elapsed + max(0, budget - steps_at_stop) * per_step, 4)
+            if time_capped:
+                objective = 1e9
         _append_csv(
             trial_csv,
             {
@@ -467,7 +489,13 @@ def run_cell(
         )
     threshold = SOLVE_THRESHOLD[env_name]
     baseline = _random_baseline(env_name, seed, baseline_path)
-    db_path = OUT_DIR / f"hpo_{algo}_sb3.db"
+    study_name = f"hpo_{algo}_sb3"
+    db_path = OUT_DIR / f"{study_name}.db"
+    states = _count_trial_states(db_path, study_name)
+    n_completed = states.get("COMPLETE", 0)
+    n_remaining = max(0, n_trials - n_completed)
+    if n_remaining == 0:
+        return False
     db_path.parent.mkdir(parents=True, exist_ok=True)
     storage = "sqlite:///" + urllib.parse.quote(db_path.as_posix(), safe="/")
     pruner = MedianPruner(
@@ -477,7 +505,7 @@ def run_cell(
         interval_steps=1,
     )
     study = optuna.create_study(
-        study_name=f"hpo_{algo}_sb3",
+        study_name=study_name,
         storage=storage,
         load_if_exists=True,
         direction="minimize",
@@ -496,8 +524,6 @@ def run_cell(
         f"baseline={baseline:.2f} threshold={threshold} n_envs in {list(n_envs_choices)}"
     )
 
-    deadline_s = {"t": float("inf")}
-
     def objective(trial) -> float:
         return _run_trial(
             trial,
@@ -509,14 +535,14 @@ def run_cell(
             threshold=threshold,
             chunk_csv=chunk_csv,
             trial_csv=trial_csv,
-            trial_deadline=deadline_s["t"],
         )
 
-    for _ in range(n_trials):
+    for _ in range(n_remaining):
+        if _shutdown_requested:
+            return True
         if clock.expired():
             tqdm.write(f"wall clock: stopping before {algo}")
             return True
-        deadline_s["t"] = clock.trial_deadline()
         grid.set_postfix_str(f"{algo}")
         n_before = len(study.trials)
         try:
@@ -550,6 +576,12 @@ def parse_args() -> argparse.Namespace:
         help="candidate n_envs values to sample from (default: 4..8192 by doubling)",
     )
     p.add_argument("--trials", type=int, default=8)
+    p.add_argument(
+        "--resume",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="resume from existing Optuna sqlite DB (default: True); --no-resume deletes selected DBs",
+    )
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
         "--max-hours",
@@ -570,17 +602,50 @@ def main() -> None:
     algos = ["ppo", "sac", "td3"] if args.algo == "all" else [args.algo]
     names = {"ppo": ("PPO", "CartPole"), "sac": ("SAC", "Pendulum"), "td3": ("TD3", "Pendulum")}
     n_envs_choices = tuple(args.n_envs)
-    n_total = len(algos) * args.trials
-    clock = _WallClock(args.max_hours, n_total)
+
+    if not args.resume:
+        for key in algos:
+            algo, _ = names[key]
+            db_path = OUT_DIR / f"hpo_{algo}_sb3.db"
+            if db_path.exists():
+                db_path.unlink()
+
+    plan = []
+    total_remaining = 0
+    for key in algos:
+        algo, env_name = names[key]
+        study_name = f"hpo_{algo}_sb3"
+        db_path = OUT_DIR / f"{study_name}.db"
+        states = _count_trial_states(db_path, study_name)
+        n_completed = states.get("COMPLETE", 0)
+        n_pruned = states.get("PRUNED", 0)
+        n_fail = states.get("FAIL", 0)
+        n_remaining = max(0, args.trials - n_completed)
+        if n_completed or n_pruned or n_fail:
+            tqdm.write(
+                f"Study {study_name}: {n_completed} COMPLETE, {n_pruned} PRUNED, "
+                f"{n_fail} FAIL; {n_remaining} remaining"
+            )
+        plan.append((key, algo, env_name, n_remaining))
+        total_remaining += n_remaining
+
+    if total_remaining == 0:
+        print("All requested trials already completed.")
+        return
+
+    clock = _WallClock(args.max_hours, total_remaining)
     if args.max_hours > 0:
         tqdm.write(f"wall-clock cap: {args.max_hours:g}h")
-    grid = tqdm(total=n_total, desc="HPO", unit="trial", position=0, dynamic_ncols=True)
+    grid = tqdm(total=total_remaining, desc="HPO", unit="trial", position=0, dynamic_ncols=True)
     try:
-        for key in algos:
-            algo, env_name = names[key]
+        for _key, algo, env_name, n_remaining in plan:
+            if n_remaining == 0:
+                continue
+            if _shutdown_requested:
+                break
             if clock.expired():
                 tqdm.write("wall clock: not starting further cells")
-                return
+                break
             stopped = run_cell(
                 algo,
                 env_name,
@@ -593,8 +658,8 @@ def main() -> None:
                 clock=clock,
                 grid=grid,
             )
-            if stopped:
-                return
+            if _shutdown_requested or stopped:
+                break
     finally:
         grid.close()
 

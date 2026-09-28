@@ -7,7 +7,7 @@ import math
 import mlx.core as mx
 import numpy as np
 
-from dbn.reinforcement.envs.spaces import Box
+from dbn.reinforcement.common import Box
 
 _MAX_SPEED = 8.0
 _MAX_TORQUE = 2.0
@@ -29,11 +29,12 @@ def _pendulum_step_reset(
     steps: mx.array,
     fresh: mx.array,
     max_steps: mx.array,
-) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Fused vectorized dynamics + truncation + auto-reset + obs projection.
 
     state (N,2)=[theta, theta_dot], action (N,1), steps (N,) int, fresh (N,2).
-    Returns obs, next_state, reward, truncated, done, steps_after_reset.
+    Returns obs, terminal_obs, next_state, reward, truncated, done, steps_after_reset.
+    terminal_obs is the projection of next_state before the auto-reset mask is applied.
     """
     theta, theta_dot = state[:, 0], state[:, 1]
     u = mx.clip(action[:, 0], -_MAX_TORQUE, _MAX_TORQUE)
@@ -50,6 +51,10 @@ def _pendulum_step_reset(
     truncated = (steps >= max_steps).astype(mx.float32)
     done = truncated
 
+    # Project next_state to observation space before the reset mask.
+    theta_term, theta_dot_term = next_state[:, 0], next_state[:, 1]
+    terminal_obs = mx.stack([mx.cos(theta_term), mx.sin(theta_term), theta_dot_term], axis=-1)
+
     mask = done[:, None]
     next_state = next_state * (1.0 - mask) + fresh * mask
     steps = mx.where(done > 0, mx.zeros_like(steps), steps)
@@ -57,7 +62,7 @@ def _pendulum_step_reset(
     # Project next_state to observation space in the same graph.
     theta_out, theta_dot_out = next_state[:, 0], next_state[:, 1]
     obs = mx.stack([mx.cos(theta_out), mx.sin(theta_out), theta_dot_out], axis=-1)
-    return obs, next_state, reward, truncated, done, steps
+    return obs, terminal_obs, next_state, reward, truncated, done, steps
 
 
 _step_reset_compiled = mx.compile(_pendulum_step_reset)
@@ -127,7 +132,7 @@ class Pendulum:
         action_mx = mx.array(a)
         # Sample fresh states now so the compiled kernel can auto-reset in one graph.
         fresh = self._sample_state()
-        obs, next_state, reward, truncated, done, steps = _step_reset_compiled(
+        obs, terminal_obs, next_state, reward, truncated, done, steps = _step_reset_compiled(
             self._state,
             action_mx,
             self._steps,
@@ -135,8 +140,9 @@ class Pendulum:
             mx.array(self.max_episode_steps),
         )
         self._steps = steps
-        mx.eval(obs, next_state, reward, truncated, done, self._steps)
+        mx.eval(obs, terminal_obs, next_state, reward, truncated, done, self._steps)
         obs_np = np.array(obs, dtype=np.float32)
+        terminal_obs_np = np.array(terminal_obs, dtype=np.float32)
         rew_np = np.array(reward, dtype=np.float32)
         trunc_np = np.array(truncated, dtype=np.float32) > 0
         done_np = np.array(done, dtype=np.float32) > 0
@@ -147,6 +153,8 @@ class Pendulum:
 
         if self.n_envs == 1:
             info: dict = {}
+            if trunc_np[0]:
+                info["terminal_observation"] = terminal_obs_np[0]
             if done_np[0]:
                 info["episode"] = {"r": float(self._ep_ret[0]), "l": int(self._ep_len[0])}
                 self._ep_ret[0] = 0.0
@@ -160,6 +168,12 @@ class Pendulum:
                     infos[i] = {"episode": {"r": float(self._ep_ret[i]), "l": int(self._ep_len[i])}}
                 self._ep_ret[done_np] = 0.0
                 self._ep_len[done_np] = 0
+            if trunc_np.any():
+                infos = list(infos)
+                for i in np.flatnonzero(trunc_np):
+                    if infos[i] is _EMPTY_INFO:
+                        infos[i] = {}
+                    infos[i]["terminal_observation"] = terminal_obs_np[i]
 
         self._state = next_state
 

@@ -54,7 +54,7 @@ def test_replay_buffer_add_batch_and_wrap():
 
 
 def test_box_batch_sample():
-    from dbn.reinforcement.envs.spaces import Box
+    from dbn.reinforcement.common import Box
 
     space = Box(low=-1.0, high=1.0, shape=(2,))
     one = space.sample()
@@ -72,6 +72,9 @@ def test_rollout_buffer_gae_shapes_discrete():
             mx.zeros((N, 4)),
             mx.zeros((N,), dtype=mx.int32),
             mx.ones((N,)),
+            mx.zeros((N,)),
+            mx.zeros((N,)),
+            mx.zeros((N,)),
             mx.zeros((N,)),
             mx.zeros((N,)),
             mx.zeros((N,)),
@@ -95,6 +98,9 @@ def test_rollout_buffer_continuous_action_shape():
         buf.add(
             mx.zeros((N, 3)),
             mx.zeros((N, 1)),
+            mx.zeros((N,)),
+            mx.zeros((N,)),
+            mx.zeros((N,)),
             mx.zeros((N,)),
             mx.zeros((N,)),
             mx.zeros((N,)),

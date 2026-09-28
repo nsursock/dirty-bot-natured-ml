@@ -6,8 +6,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from dbn.reinforcement.common import soft_update, tree_flatten, tree_map2
 from dbn.reinforcement.algos.sac import SAC
+from dbn.reinforcement.common import sac_bellman_target, soft_update, tree_flatten, tree_map2
 from dbn.reinforcement.envs import Pendulum
 
 
@@ -97,8 +97,6 @@ def test_sac_target_networks_soft_update_moves_toward_online():
 
 
 def test_sac_target_q_uses_min():
-    from dbn.reinforcement.losses import sac_bellman_target
-
     t = sac_bellman_target(
         mx.array([0.0]),
         mx.array([0.0]),

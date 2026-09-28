@@ -7,7 +7,7 @@ import math
 import mlx.core as mx
 import numpy as np
 
-from dbn.reinforcement.envs.spaces import Box, Discrete
+from dbn.reinforcement.common import Box, Discrete
 
 # Classic CartPole-v1 constants
 _GRAVITY = 9.8
@@ -28,11 +28,12 @@ def _cartpole_step_reset(
     steps: mx.array,
     fresh: mx.array,
     max_steps: mx.array,
-) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
     """Fused vectorized dynamics + truncation + auto-reset.
 
     state (N,4), action (N,) int, steps (N,) int, fresh (N,4).
-    Returns next_state, reward, terminated, truncated, done, steps_after_reset.
+    Returns terminal_obs, next_state, reward, terminated, truncated, done, steps_after_reset.
+    terminal_obs is the observation of next_state before the auto-reset mask is applied.
     """
     x, x_dot, theta, theta_dot = state[:, 0], state[:, 1], state[:, 2], state[:, 3]
     force = mx.where(action == 1, _FORCE_MAG, -_FORCE_MAG)
@@ -48,6 +49,7 @@ def _cartpole_step_reset(
     theta = theta + _TAU * theta_dot
     theta_dot = theta_dot + _TAU * thetaacc
     next_state = mx.stack([x, x_dot, theta, theta_dot], axis=-1)
+    terminal_obs = next_state
     terminated = (
         (mx.abs(x) > _X_THRESHOLD)
         | (mx.abs(theta) > _THETA_THRESHOLD)
@@ -61,7 +63,7 @@ def _cartpole_step_reset(
     mask = done[:, None]
     next_state = next_state * (1.0 - mask) + fresh * mask
     steps = mx.where(done > 0, mx.zeros_like(steps), steps)
-    return next_state, reward, terminated, truncated, done, steps
+    return terminal_obs, next_state, reward, terminated, truncated, done, steps
 
 
 # Fuse + compile dynamics, truncation, and auto-reset for repeated steps.
@@ -126,7 +128,7 @@ class CartPole:
         action_mx = mx.array(a)
         # Sample fresh states now so the compiled kernel can auto-reset in one graph.
         fresh = self._sample_state()
-        next_state, reward, terminated, truncated, done, steps = _step_reset_compiled(
+        terminal_obs, next_state, reward, terminated, truncated, done, steps = _step_reset_compiled(
             self._state,
             action_mx,
             self._steps,
@@ -134,8 +136,9 @@ class CartPole:
             mx.array(self.max_episode_steps),
         )
         self._steps = steps
-        mx.eval(next_state, reward, terminated, truncated, done, self._steps)
+        mx.eval(terminal_obs, next_state, reward, terminated, truncated, done, self._steps)
         obs = np.array(next_state, dtype=np.float32)
+        terminal_obs_np = np.array(terminal_obs, dtype=np.float32)
         rew_np = np.array(reward, dtype=np.float32)
         term_np = np.array(terminated, dtype=np.float32) > 0
         trunc_np = np.array(truncated, dtype=np.float32) > 0
@@ -146,6 +149,8 @@ class CartPole:
 
         if self.n_envs == 1:
             info: dict = {}
+            if trunc_np[0]:
+                info["terminal_observation"] = terminal_obs_np[0]
             if done_np[0]:
                 info["episode"] = {"r": float(self._ep_ret[0]), "l": int(self._ep_len[0])}
                 self._ep_ret[0] = 0.0
@@ -154,10 +159,14 @@ class CartPole:
         else:
             # Shared empty sentinel — avoid allocating n_envs dicts every step.
             infos = [_EMPTY_INFO] * self.n_envs
-            if done_np.any():
+            if done_np.any() or trunc_np.any():
                 infos = list(infos)
                 for i in np.flatnonzero(done_np):
                     infos[i] = {"episode": {"r": float(self._ep_ret[i]), "l": int(self._ep_len[i])}}
+                for i in np.flatnonzero(trunc_np):
+                    if infos[i] is _EMPTY_INFO:
+                        infos[i] = {}
+                    infos[i]["terminal_observation"] = terminal_obs_np[i]
                 self._ep_ret[done_np] = 0.0
                 self._ep_len[done_np] = 0
 

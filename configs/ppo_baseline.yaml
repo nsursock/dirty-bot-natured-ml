@@ -1,19 +1,19 @@
-# Verified PPO baseline for CartPole from benchmark_verify.py (80 runs).
-# Stable across 10/10 seeds and fastest mean wall-clock time-to-solve.
+# PPO baseline for CartPole from HPO (dirty-bot-natured HPO run, 42 trials).
+# Best wall-clock solve: 6.53 s at eval reward 475.6.
 algo: PPO
 env: CartPole
-n_envs: 128
+n_envs: 4
 n_steps: 64
 batch_size: 64
-n_epochs: 4
-learning_rate: 0.0006
+n_epochs: 10
+learning_rate: 0.002081390904620487
 normalize_advantage: false
-gamma: 0.99
-gae_lambda: 0.95
-clip_range: 0.2
-ent_coef: 0.0
-vf_coef: 0.5
-max_grad_norm: 0.5
+gamma: 0.9789410836292777
+gae_lambda: 0.9215281172825808
+clip_range: 0.09366795953557651
+ent_coef: 1.821584302149241e-07
+vf_coef: 0.9404141493979733
+max_grad_norm: 0.9171061310211512
 policy_kwargs:
   net_arch: [64, 64]
 seed: 0

@@ -121,3 +121,29 @@ def test_observation_space_matches_obs():
     for env in (CartPole(seed=0), Pendulum(seed=0)):
         obs, _ = env.reset()
         assert obs.shape == env.observation_space.shape
+
+
+def test_cartpole_truncation_returns_terminal_observation():
+    env = CartPole(n_envs=1, max_episode_steps=5, seed=0)
+    env.reset()
+    terminal_obs = None
+    for _ in range(5):
+        _, _, _, truncated, info = env.step(0)
+        if truncated:
+            terminal_obs = info.get("terminal_observation")
+            break
+    assert terminal_obs is not None
+    assert terminal_obs.shape == env.observation_space.shape
+
+
+def test_pendulum_truncation_returns_terminal_observation():
+    env = Pendulum(n_envs=1, max_episode_steps=5, seed=0)
+    env.reset()
+    terminal_obs = None
+    for _ in range(5):
+        _, _, _, truncated, info = env.step(np.array([0.0], dtype=np.float32))
+        if truncated:
+            terminal_obs = info.get("terminal_observation")
+            break
+    assert terminal_obs is not None
+    assert terminal_obs.shape == env.observation_space.shape

@@ -1,16 +1,16 @@
-# Verified SAC baseline for Pendulum from update-intensity diagnostic.
-# Robust at the relaxed solve threshold of -200 across 3 seeds.
+# SAC baseline for Pendulum. HPO best was n_envs=64 in 3.47 s; this config
+# uses the common n_envs=4 width and solves in ~104 s at eval reward -179.
 algo: SAC
 env: Pendulum
-n_envs: 128
-train_freq: 8
+n_envs: 4
+train_freq: 1
 gradient_steps: 8
-learning_rate: 0.0015
-batch_size: 128
-buffer_size: 1000000
-learning_starts: 10000
-gamma: 0.95
-tau: 0.0065
+learning_rate: 0.0018493240125589667
+batch_size: 256
+buffer_size: 100000
+learning_starts: 1000
+gamma: 0.9544901775920978
+tau: 0.008491112161695773
 policy_kwargs:
   net_arch: [256, 256]
 seed: 0

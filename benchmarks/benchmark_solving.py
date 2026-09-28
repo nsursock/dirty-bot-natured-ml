@@ -29,6 +29,7 @@ from tqdm import tqdm
 from dbn.reinforcement.algos.ppo import PPO
 from dbn.reinforcement.algos.sac import SAC
 from dbn.reinforcement.algos.td3 import TD3
+from dbn.reinforcement.common import evaluate_policy
 from dbn.reinforcement.envs import CartPole, Pendulum
 
 # 4 → 8192 by doubling
@@ -64,6 +65,8 @@ RAW_COLUMNS = (
     "steps_to_solve",
     "elapsed_s",
     "ep_rew_mean",
+    "eval_mean",
+    "eval_std",
     "n_episodes",
 )
 
@@ -77,10 +80,18 @@ AGG_COLUMNS = (
     "solve_rate",
     "steps_mean",
     "steps_std",
+    "steps_median",
+    "steps_q25",
+    "steps_q75",
     "steps_min",
     "steps_max",
     "elapsed_s_mean",
     "ep_rew_mean",
+    "eval_mean",
+    "eval_std",
+    "eval_median",
+    "eval_q25",
+    "eval_q75",
 )
 
 
@@ -211,6 +222,8 @@ SWEEPS = {
     "td3": ("TD3", "Pendulum", _make_td3),
 }
 
+ENV_CLS = {"CartPole": CartPole, "Pendulum": Pendulum}
+
 
 def train_until_solved(
     model,
@@ -220,11 +233,15 @@ def train_until_solved(
     chunk_steps: int = CHUNK_STEPS,
     window: int = SOLVE_WINDOW,
     env_name: str = "CartPole",
+    eval_env=None,
+    eval_enabled: bool = True,
+    n_eval_episodes: int = 10,
 ) -> dict:
     """Chunked learn(); stop at first gym-solve, hopeless mid-budget, or ``max_steps``."""
     t0 = time.perf_counter()
     first = True
     gap = HOPELESS_GAP[env_name]
+    eval_mean = eval_std = float("nan")
     while model.num_timesteps < max_steps:
         target = min(max_steps, model.num_timesteps + chunk_steps)
         if first:
@@ -234,12 +251,21 @@ def train_until_solved(
             model.learn(target, progress_bar=False, reset_num_timesteps=False)
 
         ep_rew, n_eps = _ep_stats(model)
-        if is_solved(model, threshold, window=window):
+        if eval_enabled and eval_env is not None:
+            eval_mean, eval_std, _ = evaluate_policy(
+                model, eval_env, n_eval_episodes=n_eval_episodes, deterministic=True
+            )
+            solved = np.isfinite(eval_mean) and eval_mean >= threshold and n_eps >= window
+        else:
+            solved = is_solved(model, threshold, window=window)
+        if solved:
             return {
                 "solved": True,
                 "steps_to_solve": int(model.num_timesteps),
                 "elapsed_s": time.perf_counter() - t0,
                 "ep_rew_mean": ep_rew,
+                "eval_mean": eval_mean,
+                "eval_std": eval_std,
                 "n_episodes": n_eps,
             }
         # Bail at ≥50% budget if still far below threshold (scaled budgets get huge).
@@ -252,11 +278,17 @@ def train_until_solved(
             break
 
     ep_rew, n_eps = _ep_stats(model)
+    if eval_enabled and eval_env is not None and np.isnan(eval_mean):
+        eval_mean, eval_std, _ = evaluate_policy(
+            model, eval_env, n_eval_episodes=n_eval_episodes, deterministic=True
+        )
     return {
         "solved": False,
         "steps_to_solve": int(model.num_timesteps),
         "elapsed_s": time.perf_counter() - t0,
         "ep_rew_mean": ep_rew,
+        "eval_mean": eval_mean,
+        "eval_std": eval_std,
         "n_episodes": n_eps,
     }
 
@@ -276,12 +308,16 @@ def _aggregate(raw_rows: list[dict], seeds: int) -> list[dict]:
         key = (r["algo"], r["env"], int(r["n_envs"]))
         groups.setdefault(key, []).append(r)
 
+    def _q(xs, q):
+        return float(np.percentile(xs, q)) if xs else ""
+
     agg: list[dict] = []
     for (algo, env, n), rows in sorted(groups.items(), key=lambda x: (x[0][0], x[0][2])):
         solved_rows = [r for r in rows if r["solved"]]
         steps = [float(r["steps_to_solve"]) for r in solved_rows]
         elapsed = [float(r["elapsed_s"]) for r in solved_rows]
         rews = [v for r in rows if (v := _finite_float(r.get("ep_rew_mean"))) is not None]
+        evals = [v for r in rows if (v := _finite_float(r.get("eval_mean"))) is not None]
         agg.append(
             {
                 "algo": algo,
@@ -293,10 +329,18 @@ def _aggregate(raw_rows: list[dict], seeds: int) -> list[dict]:
                 "solve_rate": round(len(solved_rows) / max(len(rows), 1), 3),
                 "steps_mean": round(_mean(steps), 1) if steps else "",
                 "steps_std": round(_std(steps), 1) if steps else "",
+                "steps_median": round(_q(steps, 50), 1) if steps else "",
+                "steps_q25": round(_q(steps, 25), 1) if steps else "",
+                "steps_q75": round(_q(steps, 75), 1) if steps else "",
                 "steps_min": int(min(steps)) if steps else "",
                 "steps_max": int(max(steps)) if steps else "",
                 "elapsed_s_mean": round(_mean(elapsed), 2) if elapsed else "",
                 "ep_rew_mean": round(_mean(rews), 1) if rews else "",
+                "eval_mean": round(_mean(evals), 1) if evals else "",
+                "eval_std": round(_std(evals), 1) if evals else "",
+                "eval_median": round(_q(evals, 50), 1) if evals else "",
+                "eval_q25": round(_q(evals, 25), 1) if evals else "",
+                "eval_q75": round(_q(evals, 75), 1) if evals else "",
             }
         )
     return agg
@@ -316,6 +360,8 @@ def _print_tables(agg_rows: list[dict]) -> None:
             r["steps_std"],
             r["elapsed_s_mean"],
             r["ep_rew_mean"],
+            r["eval_mean"],
+            r["eval_std"],
         ]
         for r in agg_rows
     ]
@@ -332,6 +378,8 @@ def _print_tables(agg_rows: list[dict]) -> None:
                 "steps_std",
                 "elapsed_s_mean",
                 "ep_rew_mean",
+                "eval_mean",
+                "eval_std",
             ],
             tablefmt="github",
         )
@@ -367,6 +415,8 @@ def run_sweep(
     csv_path: Path,
     raw_csv_path: Path | None = None,
     resume: bool = True,
+    eval_enabled: bool = True,
+    n_eval_episodes: int = 10,
 ) -> list[dict]:
     seed_list = list(range(seeds))
     if raw_csv_path is None:
@@ -391,20 +441,26 @@ def run_sweep(
                         pbar.update(1)
                         continue
                     model = make_fn(n, seed)
+                    eval_env = ENV_CLS[env_name](n_envs=1, seed=seed + 100_000) if eval_enabled else None
                     result = train_until_solved(
                         model,
                         threshold=threshold,
                         max_steps=budget,
                         chunk_steps=chunk,
                         env_name=env_name,
+                        eval_env=eval_env,
+                        eval_enabled=eval_enabled,
+                        n_eval_episodes=n_eval_episodes,
                     )
                     status = "SOLVED" if result["solved"] else "FAIL"
                     ep = result["ep_rew_mean"]
+                    ev = result["eval_mean"]
                     ep_s = f"{ep:.1f}" if np.isfinite(ep) else "nan"
+                    ev_s = f"{ev:.1f}" if np.isfinite(ev) else "nan"
                     pbar.write(
                         f"{algo} n_envs={n} seed={seed}: {status} "
                         f"steps={result['steps_to_solve']} elapsed_s={result['elapsed_s']:.1f} "
-                        f"ep_rew={ep_s}",
+                        f"ep_rew={ep_s} eval_mean={ev_s}",
                     )
                     raw_rows.append(
                         {
@@ -418,6 +474,8 @@ def run_sweep(
                             "steps_to_solve": result["steps_to_solve"],
                             "elapsed_s": round(result["elapsed_s"], 3),
                             "ep_rew_mean": round(ep, 2) if np.isfinite(ep) else "",
+                            "eval_mean": round(ev, 2) if np.isfinite(ev) else "",
+                            "eval_std": round(result["eval_std"], 2) if np.isfinite(result["eval_std"]) else "",
                             "n_episodes": result["n_episodes"],
                         }
                     )
@@ -471,6 +529,8 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="load hyperparameters from configs/{algo}_baseline.yaml instead of defaults",
     )
+    p.add_argument("--eval", action=argparse.BooleanOptionalAction, default=True)
+    p.add_argument("--n-eval-episodes", type=int, default=10)
     return p.parse_args()
 
 
@@ -506,6 +566,8 @@ def main() -> None:
         csv_path=args.csv,
         raw_csv_path=args.raw_csv,
         resume=not args.no_resume,
+        eval_enabled=args.eval,
+        n_eval_episodes=args.n_eval_episodes,
     )
 
 

@@ -257,7 +257,9 @@ def make_gae(gamma: float, gae_lambda: float):
     def _gae_one_env(
         rewards: mx.array,
         values: mx.array,
-        dones: mx.array,
+        terminations: mx.array,
+        truncations: mx.array,
+        terminal_values: mx.array,
         last_value: mx.array,
     ) -> tuple[mx.array, mx.array]:
         T = int(rewards.shape[0])
@@ -265,7 +267,8 @@ def make_gae(gamma: float, gae_lambda: float):
         gae = mx.array(0.0, dtype=rewards.dtype)
         next_value = last_value
         for t in range(T - 1, -1, -1):
-            nonterminal = 1.0 - dones[t]
+            next_value = mx.where(truncations[t] > 0, terminal_values[t], next_value)
+            nonterminal = 1.0 - terminations[t]
             delta = rewards[t] + gamma * next_value * nonterminal - values[t]
             gae = delta + gamma * gae_lambda * nonterminal * gae
             adv_rev.append(gae)
@@ -273,7 +276,7 @@ def make_gae(gamma: float, gae_lambda: float):
         advantages = mx.stack(adv_rev[::-1])
         return advantages, advantages + values
 
-    return mx.compile(mx.vmap(_gae_one_env, in_axes=(1, 1, 1, 0), out_axes=(1, 1)))
+    return mx.compile(mx.vmap(_gae_one_env, in_axes=(1, 1, 1, 1, 1, 0), out_axes=(1, 1)))
 
 
 class RolloutBuffer:
@@ -303,17 +306,24 @@ class RolloutBuffer:
         self._actions: list[mx.array] = []
         self._rewards: list[mx.array] = []
         self._dones: list[mx.array] = []
+        self._terminations: list[mx.array] = []
+        self._truncations: list[mx.array] = []
+        self._terminal_values: list[mx.array] = []
         self._values: list[mx.array] = []
         self._log_probs: list[mx.array] = []
         self.obs = self.actions = self.rewards = None  # type: ignore
         self.dones = self.values = self.log_probs = None  # type: ignore
+        self.terminations = self.truncations = self.terminal_values = None  # type: ignore
         self.advantages = self.returns = None  # type: ignore
 
-    def add(self, obs, actions, rewards, dones, values, log_probs) -> None:
+    def add(self, obs, actions, rewards, dones, terminations, truncations, terminal_values, values, log_probs) -> None:
         self._obs.append(obs)
         self._actions.append(actions)
         self._rewards.append(rewards)
         self._dones.append(dones)
+        self._terminations.append(terminations)
+        self._truncations.append(truncations)
+        self._terminal_values.append(terminal_values)
         self._values.append(values)
         self._log_probs.append(log_probs)
 
@@ -322,9 +332,12 @@ class RolloutBuffer:
         self.actions = mx.stack(self._actions)
         self.rewards = mx.stack(self._rewards)
         self.dones = mx.stack(self._dones)
+        self.terminations = mx.stack(self._terminations)
+        self.truncations = mx.stack(self._truncations)
+        self.terminal_values = mx.stack(self._terminal_values)
         self.values = mx.stack(self._values)
         self.log_probs = mx.stack(self._log_probs)
-        adv, ret = self._gae(self.rewards, self.values, self.dones, last_values)
+        adv, ret = self._gae(self.rewards, self.values, self.terminations, self.truncations, self.terminal_values, last_values)
         self.advantages, self.returns = adv, ret
         mx.eval(self.advantages, self.returns)
 
@@ -522,3 +535,194 @@ class TwinQ(nn.Module):
     def __call__(self, obs: mx.array, action: mx.array) -> tuple[mx.array, mx.array]:
         x = mx.concatenate([obs, action], axis=-1)
         return mx.squeeze(self.q1(x), axis=-1), mx.squeeze(self.q2(x), axis=-1)
+
+
+# ---------------------------------------------------------------------------
+# evaluation
+# ---------------------------------------------------------------------------
+
+def evaluate_policy(
+    model,
+    env,
+    n_eval_episodes: int = 10,
+    deterministic: bool = True,
+) -> tuple[float, float, int]:
+    """Run deterministic policy evaluation, return (mean, std, n_episodes)."""
+    n_envs = int(getattr(env, "num_envs", getattr(env, "n_envs", 1)))
+    obs, _ = env.reset()
+    episode_returns: list[float] = []
+    current_returns = np.zeros(n_envs, dtype=np.float64)
+    while len(episode_returns) < n_eval_episodes:
+        action, _ = model.predict(obs, deterministic=deterministic)
+        step_out = env.step(action)
+        if len(step_out) == 5:
+            next_obs, rewards, terminations, truncations, _ = step_out
+            dones = np.logical_or(terminations, truncations)
+        else:
+            next_obs, rewards, dones, _ = step_out
+        rewards = np.asarray(rewards).reshape(n_envs)
+        dones = np.asarray(dones).reshape(n_envs)
+        current_returns += rewards
+        obs = next_obs
+        for i in np.flatnonzero(dones):
+            episode_returns.append(float(current_returns[i]))
+            current_returns[i] = 0.0
+    returns = np.asarray(episode_returns[:n_eval_episodes], dtype=np.float64)
+    mean = float(np.mean(returns))
+    std = float(np.std(returns, ddof=1)) if len(returns) > 1 else 0.0
+    return mean, std, len(returns)
+
+
+# ---------------------------------------------------------------------------
+# losses
+# ---------------------------------------------------------------------------
+
+def ppo_ratio(new_log_prob: mx.array, old_log_prob: mx.array) -> mx.array:
+    return mx.exp(new_log_prob - old_log_prob)
+
+
+def ppo_policy_loss(
+    new_log_prob: mx.array,
+    old_log_prob: mx.array,
+    advantages: mx.array,
+    clip_range: float,
+) -> mx.array:
+    """Clipped surrogate: -mean(min(r*A, clip(r)*A))."""
+    ratio = ppo_ratio(new_log_prob, old_log_prob)
+    pg1 = ratio * advantages
+    pg2 = mx.clip(ratio, 1.0 - clip_range, 1.0 + clip_range) * advantages
+    return -mx.mean(mx.minimum(pg1, pg2))
+
+
+def ppo_value_loss(
+    values: mx.array,
+    returns: mx.array,
+    old_values: mx.array | None = None,
+    clip_range_vf: float | None = None,
+) -> mx.array:
+    if clip_range_vf is None or old_values is None:
+        return mx.mean((returns - values) ** 2)
+    v_clipped = old_values + mx.clip(values - old_values, -clip_range_vf, clip_range_vf)
+    return 0.5 * mx.mean(
+        mx.maximum((returns - values) ** 2, (returns - v_clipped) ** 2)
+    )
+
+
+def ppo_entropy_loss(entropy: mx.array) -> mx.array:
+    """Entropy bonus term as used in PPO total loss (negative mean entropy)."""
+    return -mx.mean(entropy)
+
+
+def normalize_advantages(advantages: mx.array, eps: float = 1e-8) -> mx.array:
+    return (advantages - mx.mean(advantages)) / (mx.std(advantages) + eps)
+
+
+def sac_bellman_target(
+    rewards: mx.array,
+    dones: mx.array,
+    next_q1: mx.array,
+    next_q2: mx.array,
+    next_log_prob: mx.array,
+    alpha: mx.array | float,
+    gamma: float,
+) -> mx.array:
+    """Soft Bellman target using twin-Q minimum."""
+    return rewards + (1.0 - dones) * gamma * (
+        mx.minimum(next_q1, next_q2) - alpha * next_log_prob
+    )
+
+
+def sac_critic_loss(q1: mx.array, q2: mx.array, target_q: mx.array) -> mx.array:
+    return 0.5 * (mx.mean((q1 - target_q) ** 2) + mx.mean((q2 - target_q) ** 2))
+
+
+def sac_actor_loss(
+    log_prob: mx.array,
+    q1: mx.array,
+    q2: mx.array,
+    alpha: mx.array | float,
+) -> mx.array:
+    return mx.mean(alpha * log_prob - mx.minimum(q1, q2))
+
+
+def sac_alpha_loss(
+    log_alpha: mx.array,
+    log_prob: mx.array,
+    target_entropy: float,
+) -> mx.array:
+    return -mx.mean(log_alpha * mx.stop_gradient(log_prob + target_entropy))
+
+
+def td3_smooth_target_action(
+    actor_action: mx.array,
+    noise: mx.array,
+    *,
+    noise_clip: float,
+    action_scale: mx.array,
+    action_bias: mx.array,
+) -> mx.array:
+    """Target policy smoothing: clip noise, then clip action to bounds."""
+    clipped_noise = mx.clip(noise, -noise_clip, noise_clip) * action_scale
+    low = action_bias - action_scale
+    high = action_bias + action_scale
+    return mx.clip(actor_action + clipped_noise, low, high)
+
+
+def td3_bellman_target(
+    rewards: mx.array,
+    dones: mx.array,
+    next_q1: mx.array,
+    next_q2: mx.array,
+    gamma: float,
+) -> mx.array:
+    return rewards + (1.0 - dones) * gamma * mx.minimum(next_q1, next_q2)
+
+
+def td3_critic_loss(q1: mx.array, q2: mx.array, target_q: mx.array) -> mx.array:
+    return 0.5 * (mx.mean((q1 - target_q) ** 2) + mx.mean((q2 - target_q) ** 2))
+
+
+def td3_actor_loss(q_value: mx.array) -> mx.array:
+    return -mx.mean(q_value)
+
+
+# ---------------------------------------------------------------------------
+# spaces
+# ---------------------------------------------------------------------------
+
+class Box:
+    def __init__(self, low, high, shape=None, dtype=np.float32):
+        if shape is None:
+            low_a = np.asarray(low, dtype=dtype)
+            high_a = np.asarray(high, dtype=dtype)
+            shape = low_a.shape
+            self.low = low_a
+            self.high = high_a
+        else:
+            self.low = np.full(shape, low, dtype=dtype)
+            self.high = np.full(shape, high, dtype=dtype)
+        self.shape = tuple(shape)
+        self.dtype = dtype
+        self._rng = np.random.default_rng()
+
+    def sample(self, rng: np.random.Generator | None = None, n: int | None = None):
+        """Sample one action, or a batch of ``n`` actions with shape (n, *shape)."""
+        rng = rng or self._rng
+        if n is None:
+            return rng.uniform(self.low, self.high).astype(self.dtype)
+        size = (int(n),) + self.shape
+        return rng.uniform(self.low, self.high, size=size).astype(self.dtype)
+
+
+class Discrete:
+    def __init__(self, n: int):
+        self.n = int(n)
+        self.shape = ()
+        self.dtype = np.int64
+        self._rng = np.random.default_rng()
+
+    def sample(self, rng: np.random.Generator | None = None, n: int | None = None):
+        rng = rng or self._rng
+        if n is None:
+            return int(rng.integers(0, self.n))
+        return rng.integers(0, self.n, size=int(n), dtype=self.dtype)

@@ -5,8 +5,8 @@ from __future__ import annotations
 import mlx.core as mx
 import numpy as np
 
-from dbn.reinforcement.common import make_gae, soft_update
-from dbn.reinforcement.losses import (
+from dbn.reinforcement.common import (
+    make_gae,
     normalize_advantages,
     ppo_policy_loss,
     ppo_ratio,
@@ -15,6 +15,7 @@ from dbn.reinforcement.losses import (
     sac_alpha_loss,
     sac_bellman_target,
     sac_critic_loss,
+    soft_update,
     td3_bellman_target,
     td3_smooth_target_action,
 )
@@ -39,8 +40,14 @@ def test_gae_matches_reference():
         rewards, values, dones, last_values, gamma, lam
     )
     gae_fn = make_gae(gamma, lam)
+    zeros = np.zeros_like(dones)
     got_adv, got_ret = gae_fn(
-        mx.array(rewards), mx.array(values), mx.array(dones), mx.array(last_values)
+        mx.array(rewards),
+        mx.array(values),
+        mx.array(dones),
+        mx.array(zeros),
+        mx.array(zeros),
+        mx.array(last_values),
     )
     mx.eval(got_adv, got_ret)
     np.testing.assert_allclose(np.array(got_adv), expected_adv, rtol=1e-5, atol=1e-6)
@@ -55,7 +62,10 @@ def test_gae_handles_all_dones():
     last = np.zeros((N,), dtype=np.float32)
     expected_adv, expected_ret = reference_gae(rewards, values, dones, last, 0.99, 0.95)
     gae_fn = make_gae(0.99, 0.95)
-    got_adv, got_ret = gae_fn(mx.array(rewards), mx.array(values), mx.array(dones), mx.array(last))
+    zeros = np.zeros_like(dones)
+    got_adv, got_ret = gae_fn(
+        mx.array(rewards), mx.array(values), mx.array(dones), mx.array(zeros), mx.array(zeros), mx.array(last)
+    )
     mx.eval(got_adv, got_ret)
     np.testing.assert_allclose(np.array(got_adv), expected_adv, rtol=1e-5, atol=1e-6)
     np.testing.assert_allclose(np.array(got_ret), expected_ret, rtol=1e-5, atol=1e-6)

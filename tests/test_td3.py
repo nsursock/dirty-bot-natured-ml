@@ -6,8 +6,8 @@ import mlx.core as mx
 import numpy as np
 import pytest
 
-from dbn.reinforcement.common import tree_flatten
 from dbn.reinforcement.algos.td3 import TD3
+from dbn.reinforcement.common import td3_smooth_target_action, tree_flatten
 from dbn.reinforcement.envs import Pendulum
 
 
@@ -74,8 +74,6 @@ def test_td3_delayed_actor_update():
 
 
 def test_td3_target_noise_clipped():
-    from dbn.reinforcement.losses import td3_smooth_target_action
-
     out = td3_smooth_target_action(
         mx.array([[0.0]]),
         mx.array([[100.0]]),

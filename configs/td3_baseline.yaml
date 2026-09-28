@@ -1,20 +1,20 @@
-# Verified TD3 baseline for Pendulum from update-intensity diagnostic.
-# Robust at the relaxed solve threshold of -200 across 5 seeds.
+# TD3 baseline for Pendulum. HPO best was n_envs=64 in 8.68 s; this config
+# uses the common n_envs=4 width and solves in ~80 s at eval reward -177.
 algo: TD3
 env: Pendulum
-n_envs: 128
-train_freq: 8
-gradient_steps: 16
-learning_rate: 0.003
+n_envs: 4
+train_freq: 1
+gradient_steps: 8
+learning_rate: 0.0008938615145126269
 batch_size: 128
-buffer_size: 1000000
-learning_starts: 10000
-gamma: 0.997
-tau: 0.015
+buffer_size: 500000
+learning_starts: 5000
+gamma: 0.9679075748758313
+tau: 0.013059821770632293
 policy_delay: 3
-target_policy_noise: 0.12
-target_noise_clip: 0.514
-action_noise_std: 0.085
+target_policy_noise: 0.2805421209221104
+target_noise_clip: 0.5524870520532993
+action_noise_std: 0.16179798963580774
 policy_kwargs:
   net_arch: [256, 256]
 seed: 0

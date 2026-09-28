@@ -1,6 +1,8 @@
-# Dirty Bot Natured — ML library (JAX/MLX) for trading bots.
+# Dirty Bot Natured — a general-purpose ML library in MLX.
 
 No Stable-Baselines3 or Gymnasium dependency — envs and algos are native.
+
+It currently ships native MLX implementations of PPO, SAC, TD3 plus CartPole and Pendulum envs, and is built to be used inside the Dirty Trading Bot project first.
 
 ## Install
 
@@ -15,7 +17,7 @@ dbn/reinforcement/
   algos/   common.py, losses.py, ppo.py, sac.py, td3.py
   envs/    cartpole.py, pendulum.py, spaces.py
 tests/     correctness / contracts / regression (pytest)
-benchmarks/  FPS / scaling (not in CI)
+benchmarks/  FPS / scaling / solving (not in CI)
 ```
 
 ## Examples

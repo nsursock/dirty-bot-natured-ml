@@ -22,8 +22,6 @@ from dbn.reinforcement.common import (
     as_numpy,
     soft_update,
     space_info,
-)
-from dbn.reinforcement.losses import (
     td3_actor_loss,
     td3_bellman_target,
     td3_critic_loss,
@@ -109,6 +107,7 @@ class TD3:
         self.replay = ReplayBuffer(buffer_size, self.obs_dim, self.action_dim)
         self._logger: Logger | None = None
         self.num_timesteps = 0
+        self._env_steps = 0
         self._n_updates = 0
         self._ep_info_buffer: deque = deque(maxlen=100)
         self._key = mx.random.key(seed if seed is not None else 0)
@@ -245,12 +244,18 @@ class TD3:
                 step_out = self.env.step(actions[0] if self.n_envs == 1 else actions)
                 if len(step_out) == 5:
                     next_obs, rewards, terminations, truncations, infos = step_out
-                    dones = np.logical_or(terminations, truncations)
                 else:
                     next_obs, rewards, dones, infos = step_out
+                    terminations = dones
+                    truncations = np.zeros(self.n_envs, dtype=dones.dtype)
                 next_obs_np = self._obs_np(next_obs)
+                trunc_np = np.atleast_1d(np.asarray(truncations, dtype=bool)).reshape(self.n_envs)
+                for i in np.flatnonzero(trunc_np):
+                    term_obs = infos[i].get("terminal_observation") if isinstance(infos, (list, tuple)) and i < len(infos) else infos.get("terminal_observation") if isinstance(infos, dict) else None
+                    if term_obs is not None:
+                        next_obs_np[i] = np.asarray(term_obs, dtype=np.float32).reshape(self.obs_dim)
+                dones = np.atleast_1d(np.asarray(terminations, dtype=np.float32))
                 rewards = np.atleast_1d(np.asarray(rewards, dtype=np.float32))
-                dones = np.atleast_1d(np.asarray(dones, dtype=np.float32))
 
                 self.replay.add_batch(obs, actions, rewards, next_obs_np, dones)
                 if isinstance(infos, dict):
@@ -263,9 +268,10 @@ class TD3:
 
                 obs = next_obs_np
                 self.num_timesteps += self.n_envs
+                self._env_steps += 1
                 pbar.update(self.n_envs)
 
-                if self.num_timesteps >= self.learning_starts and self.num_timesteps % self.train_freq == 0:
+                if self.num_timesteps >= self.learning_starts and self._env_steps % self.train_freq == 0:
                     for _ in range(self.gradient_steps):
                         train_info = self._train_step()
 

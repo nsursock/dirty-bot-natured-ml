@@ -26,15 +26,13 @@ from dbn.reinforcement.common import (
     gaussian_entropy,
     gaussian_log_prob,
     gaussian_sample,
-    space_info,
-    tree_flatten_dict,
-)
-from dbn.reinforcement.losses import (
     normalize_advantages,
     ppo_entropy_loss,
     ppo_policy_loss,
     ppo_ratio,
     ppo_value_loss,
+    space_info,
+    tree_flatten_dict,
 )
 
 
@@ -195,11 +193,22 @@ class PPO:
             dones = np.logical_or(terminations, truncations)
         else:
             obs, rewards, dones, infos = out
+            terminations = dones
+            truncations = np.zeros(self.n_envs, dtype=dones.dtype)
         rewards = np.asarray(rewards, dtype=np.float32).reshape(self.n_envs)
         dones = np.asarray(dones, dtype=np.float32).reshape(self.n_envs)
+        terminations = np.asarray(terminations, dtype=np.float32).reshape(self.n_envs)
+        truncations = np.asarray(truncations, dtype=np.float32).reshape(self.n_envs)
         if not isinstance(infos, (list, tuple)):
             infos = [infos]
-        return self._obs_to_mx(obs), mx.array(rewards), mx.array(dones), infos
+        return (
+            self._obs_to_mx(obs),
+            mx.array(rewards),
+            mx.array(terminations),
+            mx.array(truncations),
+            mx.array(dones),
+            infos,
+        )
 
     def predict(self, obs, deterministic: bool = False):
         assert self.policy is not None
@@ -233,8 +242,9 @@ class PPO:
                 actions = categorical_sample(logits_or_mean, self._next_key())
                 logp = categorical_log_prob(logits_or_mean, actions)
             mx.eval(actions, values, logp)
-            next_obs, rewards, dones, infos = self._step_env(actions)
-            self.buffer.add(obs, actions, rewards, dones, values, logp)
+            next_obs, rewards, terminations, truncations, dones, infos = self._step_env(actions)
+            terminal_values = self._make_terminal_values(truncations, infos)
+            self.buffer.add(obs, actions, rewards, dones, terminations, truncations, terminal_values, values, logp)
             self.num_timesteps += self.n_envs
             for info in infos:
                 if info and "episode" in info:
@@ -244,6 +254,28 @@ class PPO:
         mx.eval(last_values)
         self.buffer.compute_returns_and_advantage(last_values)
         return obs
+
+    def _make_terminal_values(self, truncations: mx.array, infos: list[dict]) -> mx.array:
+        assert self.policy is not None
+        terminal_values = mx.zeros((self.n_envs,), dtype=mx.float32)
+        trunc_np = np.asarray(truncations).reshape(self.n_envs)
+        if trunc_np.any():
+            obs_list: list[np.ndarray] = []
+            idx_list: list[int] = []
+            for i in np.flatnonzero(trunc_np):
+                term_obs = infos[i].get("terminal_observation") if i < len(infos) else None
+                if term_obs is not None:
+                    obs_list.append(np.asarray(term_obs, dtype=np.float32).reshape(self.obs_dim))
+                    idx_list.append(i)
+            if obs_list:
+                batch = mx.array(np.stack(obs_list, axis=0))
+                vals = self.policy.value(batch)
+                mx.eval(vals)
+                vals_np = np.asarray(vals).reshape(-1)
+                terminal_values_np = np.asarray(terminal_values, dtype=np.float32)
+                terminal_values_np[idx_list] = vals_np
+                terminal_values = mx.array(terminal_values_np)
+        return terminal_values
 
     def _train(self) -> dict[str, float]:
         assert self.buffer is not None and self._compiled_update is not None
@@ -281,7 +313,7 @@ class PPO:
                 if self.target_kl is not None and float(kl) > 1.5 * self.target_kl:
                     early_stop = True
                     break
-        self._n_updates += self.n_epochs
+        self._n_updates += n_updates
         return {k: v / max(n_updates, 1) for k, v in totals.items()}
 
     def learn(
