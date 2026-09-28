@@ -6,6 +6,7 @@ from collections import deque
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
+import time
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -170,7 +171,15 @@ class SAC:
                 alpha = log_alpha_mod()
 
             soft_update(critic_target, critic, tau)
-            return crit_loss, actor_loss, alpha_loss, alpha
+
+            # Diagnostics (no gradient contribution).
+            q1_b, q2_b = critic(obs, actions)
+            td_err1 = mx.abs(q1_b - mx.stop_gradient(target_q))
+            td_err2 = mx.abs(q2_b - mx.stop_gradient(target_q))
+            td_error = mx.concatenate([td_err1, td_err2])
+            entropy = -mx.mean(logp)
+
+            return crit_loss, actor_loss, alpha_loss, alpha, entropy, q1_b, q2_b, target_q, td_error
 
         self._compiled = update_step
 
@@ -188,19 +197,49 @@ class SAC:
 
     def _train_step(self) -> dict[str, float]:
         b = self.replay.sample(self.batch_size)
-        crit_loss, actor_loss, alpha_loss, alpha = self._compiled(
+        (
+            crit_loss,
+            actor_loss,
+            alpha_loss,
+            alpha,
+            entropy,
+            q1_b,
+            q2_b,
+            target_q,
+            td_error,
+        ) = self._compiled(
             b["obs"], b["actions"], b["rewards"], b["next_obs"], b["dones"], self._next_key()
         )
-        outs = [crit_loss, actor_loss, alpha_loss, alpha, self.actor.parameters(), self.critic.parameters()]
+        outs = [
+            crit_loss,
+            actor_loss,
+            alpha_loss,
+            alpha,
+            entropy,
+            q1_b,
+            q2_b,
+            target_q,
+            td_error,
+            self.actor.parameters(),
+            self.critic.parameters(),
+        ]
         if self.log_alpha_mod is not None:
             outs.append(self.log_alpha_mod.parameters())
         mx.eval(*outs)
         self._n_updates += 1
+
+        q_values = mx.concatenate([q1_b, q2_b])
         return {
-            "critic_loss": float(crit_loss),
             "actor_loss": float(actor_loss),
-            "ent_coef_loss": float(alpha_loss),
+            "critic_loss": float(crit_loss),
             "ent_coef": float(alpha),
+            "ent_coef_loss": float(alpha_loss),
+            "entropy": float(entropy),
+            "q_value_mean": float(mx.mean(q_values)),
+            "q_value_std": float(mx.sqrt(mx.mean((q_values - mx.mean(q_values)) ** 2))),
+            "target_q_mean": float(mx.mean(target_q)),
+            "td_error_abs_mean": float(mx.mean(td_error)),
+            "td_error_std": float(mx.sqrt(mx.mean((td_error - mx.mean(td_error)) ** 2))),
         }
 
     def learn(
@@ -215,6 +254,8 @@ class SAC:
             self.num_timesteps = 0
         if self.tensorboard_log is not None and self._logger is None:
             self._logger = Logger(Path(self.tensorboard_log) / f"{tb_log_name}_1")
+
+        train_start = time.time()
 
         out = self.env.reset()
         obs = self._obs_np(out[0] if isinstance(out, tuple) else out)
@@ -287,6 +328,10 @@ class SAC:
                             metrics["rollout/ep_len_mean"] = float(
                                 np.mean([e["l"] for e in self._ep_info_buffer])
                             )
+                        elapsed = time.time() - train_start
+                        metrics["time/total_timesteps"] = float(self.num_timesteps)
+                        metrics["time/time_elapsed"] = elapsed
+                        metrics["time/fps"] = float(self.num_timesteps) / max(elapsed, 1e-6)
                         self._logger.record(metrics, self.num_timesteps)
                         self._logger.flush()
         finally:

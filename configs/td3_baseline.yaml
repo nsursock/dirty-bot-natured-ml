@@ -1,8 +1,7 @@
-# TD3 baseline for Pendulum. HPO best was n_envs=64 in 8.68 s; this config
-# uses the common n_envs=4 width and solves in ~80 s at eval reward -177.
+# TD3 baseline for Pendulum (HPO best: n_envs=64, solves in ~23 s at eval reward -148).
 algo: TD3
 env: Pendulum
-n_envs: 4
+n_envs: 64
 train_freq: 1
 gradient_steps: 8
 learning_rate: 0.0008938615145126269

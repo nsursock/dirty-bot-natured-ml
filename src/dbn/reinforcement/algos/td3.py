@@ -6,6 +6,7 @@ from collections import deque
 from functools import partial
 from pathlib import Path
 from typing import Any, Callable
+import time
 
 import mlx.core as mx
 import mlx.nn as nn
@@ -155,7 +156,16 @@ class TD3:
             target_q = td3_bellman_target(rewards, dones, q1_t, q2_t, gamma)
             loss, grads = critic_vag(critic, obs, actions, mx.stop_gradient(target_q))
             critic_opt.update(critic, grads)
-            return loss
+
+            # Diagnostics (no gradient contribution).
+            q1_b, q2_b = critic(obs, actions)
+            td_err1 = mx.abs(q1_b - mx.stop_gradient(target_q))
+            td_err2 = mx.abs(q2_b - mx.stop_gradient(target_q))
+            td_error = mx.concatenate([td_err1, td_err2])
+            clipped_noise = mx.clip(raw_noise, -noise_clip, noise_clip) * scale
+            clip_fraction = mx.mean(mx.abs(raw_noise) > noise_clip).astype(mx.float32)
+
+            return loss, q1_b, q2_b, target_q, td_error, clipped_noise, clip_fraction
 
         @partial(mx.compile, inputs=actor_state, outputs=actor_state)
         def actor_step(obs):
@@ -187,16 +197,47 @@ class TD3:
 
     def _train_step(self) -> dict[str, float]:
         b = self.replay.sample(self.batch_size)
-        crit_loss = self._compiled_critic(
+        (
+            crit_loss,
+            q1_b,
+            q2_b,
+            target_q,
+            td_error,
+            applied_noise,
+            clip_fraction,
+        ) = self._compiled_critic(
             b["obs"], b["actions"], b["rewards"], b["next_obs"], b["dones"], self._next_key()
         )
-        mx.eval(crit_loss, self.critic.parameters())
-        info = {"critic_loss": float(crit_loss), "actor_loss": 0.0}
+        mx.eval(
+            crit_loss,
+            q1_b,
+            q2_b,
+            target_q,
+            td_error,
+            applied_noise,
+            clip_fraction,
+            self.critic.parameters(),
+        )
+        q_values = mx.concatenate([q1_b, q2_b])
+        td_mean = mx.mean(td_error)
+        info = {
+            "critic_loss": float(crit_loss),
+            "actor_loss": 0.0,
+            "q_value_mean": float(mx.mean(q_values)),
+            "q_value_std": float(mx.sqrt(mx.mean((q_values - mx.mean(q_values)) ** 2))),
+            "target_q_mean": float(mx.mean(target_q)),
+            "td_error_abs_mean": float(td_mean),
+            "td_error_std": float(mx.sqrt(mx.mean((td_error - td_mean) ** 2))),
+            "target_noise_std": float(mx.std(applied_noise.reshape(-1))),
+            "target_noise_clip_fraction": float(clip_fraction),
+            "actor_update_fraction": 0.0,
+        }
         self._n_updates += 1
         if self._n_updates % self.policy_delay == 0:
             actor_loss = self._compiled_actor(b["obs"])
             mx.eval(actor_loss, self.actor.parameters(), self.actor_target.parameters(), self.critic_target.parameters())
             info["actor_loss"] = float(actor_loss)
+            info["actor_update_fraction"] = 1.0
         return info
 
     def learn(
@@ -211,6 +252,8 @@ class TD3:
             self.num_timesteps = 0
         if self.tensorboard_log is not None and self._logger is None:
             self._logger = Logger(Path(self.tensorboard_log) / f"{tb_log_name}_1")
+
+        train_start = time.time()
 
         out = self.env.reset()
         obs = self._obs_np(out[0] if isinstance(out, tuple) else out)
@@ -293,6 +336,10 @@ class TD3:
                             metrics["rollout/ep_len_mean"] = float(
                                 np.mean([e["l"] for e in self._ep_info_buffer])
                             )
+                        elapsed = time.time() - train_start
+                        metrics["time/total_timesteps"] = float(self.num_timesteps)
+                        metrics["time/time_elapsed"] = elapsed
+                        metrics["time/fps"] = float(self.num_timesteps) / max(elapsed, 1e-6)
                         self._logger.record(metrics, self.num_timesteps)
                         self._logger.flush()
         finally:
