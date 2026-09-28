@@ -1,0 +1,19 @@
+# Verified PPO baseline for CartPole from benchmark_verify.py (80 runs).
+# Stable across 10/10 seeds and fastest mean wall-clock time-to-solve.
+algo: PPO
+env: CartPole
+n_envs: 128
+n_steps: 64
+batch_size: 64
+n_epochs: 4
+learning_rate: 0.0006
+normalize_advantage: false
+gamma: 0.99
+gae_lambda: 0.95
+clip_range: 0.2
+ent_coef: 0.0
+vf_coef: 0.5
+max_grad_norm: 0.5
+policy_kwargs:
+  net_arch: [64, 64]
+seed: 0

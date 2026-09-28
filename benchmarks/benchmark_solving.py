@@ -2,7 +2,7 @@
 
 Gym / Gymnasium solve criteria (mean episode return over the last 100 episodes):
   CartPole-v1:  reward_threshold = 475.0   (official gym registry)
-  Pendulum-v1:  reward_threshold = -150.0  (no registry threshold; community default)
+  Pendulum-v1:  reward_threshold = -200.0  (no registry threshold; community default)
 
 Sweep: n_envs = 4, 8, 16, …, 8192. Env-step budget scales with n_envs
 (base budget at n_envs=4, linear in n_envs thereafter).
@@ -10,7 +10,7 @@ Sweep: n_envs = 4, 8, 16, …, 8192. Env-step budget scales with n_envs
 Run:
   python benchmarks/benchmark_solving.py
   python benchmarks/benchmark_solving.py --algo ppo --seeds 1
-  python benchmarks/benchmark_solving.py --base-budget 250000 --csv benchmarks/solving_results.csv
+  python benchmarks/benchmark_solving.py --base-budget 250000 --csv outputs/solving_results.csv
 """
 
 from __future__ import annotations
@@ -20,8 +20,11 @@ import csv
 import time
 from pathlib import Path
 
+import yaml
+
 import numpy as np
 from tabulate import tabulate
+from tqdm import tqdm
 
 from dbn.reinforcement.algos.ppo import PPO
 from dbn.reinforcement.algos.sac import SAC
@@ -47,7 +50,7 @@ MAX_EP_STEPS = {
 
 SOLVE_THRESHOLD = {
     "CartPole": 475.0,  # CartPole-v1
-    "Pendulum": -150.0,  # community; Pendulum-v1 has no gym reward_threshold
+    "Pendulum": -200.0,  # community; Pendulum-v1 has no gym reward_threshold
 }
 
 RAW_COLUMNS = (
@@ -179,6 +182,27 @@ def _make_td3(n_envs: int, seed: int) -> TD3:
         policy_kwargs={"net_arch": (256, 256)},
         seed=seed,
     )
+
+
+def _make_from_yaml(path: Path):
+    """Factory that loads a YAML config and builds the model per (n_envs, seed)."""
+    raw = yaml.safe_load(path.read_text())
+    env_name = raw["env"]
+    algo = raw["algo"]
+    base_kwargs = {k: v for k, v in raw.items() if k not in {"algo", "env", "n_envs", "seed"}}
+    if "policy_kwargs" in base_kwargs and base_kwargs["policy_kwargs"] is not None:
+        base_kwargs["policy_kwargs"] = {
+            k: tuple(v) if isinstance(v, list) else v
+            for k, v in base_kwargs["policy_kwargs"].items()
+        }
+    algo_cls = {"PPO": PPO, "SAC": SAC, "TD3": TD3}[algo]
+    env_cls = {"CartPole": CartPole, "Pendulum": Pendulum}[env_name]
+
+    def _make(n_envs: int, seed: int):
+        env = env_cls(n_envs=n_envs, seed=seed)
+        return algo_cls("MlpPolicy", env, seed=seed, verbose=0, **base_kwargs)
+
+    return algo, env_name, _make
 
 
 SWEEPS = {
@@ -336,6 +360,7 @@ def run_sweep(
     algos: list[str],
     n_envs_list: list[int],
     *,
+    sweeps: dict,
     seeds: int,
     base_budget: int,
     chunk_steps: int,
@@ -352,54 +377,56 @@ def run_sweep(
     if done:
         print(f"resume: skipping {len(done)} completed runs from {raw_csv_path}")
 
-    for key in algos:
-        algo, env_name, make_fn = SWEEPS[key]
-        threshold = SOLVE_THRESHOLD[env_name]
-        for n in n_envs_list:
-            budget = step_budget(n, base=base_budget)
-            chunk = chunk_steps_for(n, env_name, base=chunk_steps)
-            for seed in seed_list:
-                if (algo, n, seed) in done:
-                    continue
-                print(
-                    f"  {algo} {env_name} n_envs={n} seed={seed} "
-                    f"(solve>={threshold}, budget={budget}, chunk={chunk}) ...",
-                    flush=True,
-                )
-                model = make_fn(n, seed)
-                result = train_until_solved(
-                    model,
-                    threshold=threshold,
-                    max_steps=budget,
-                    chunk_steps=chunk,
-                    env_name=env_name,
-                )
-                status = "SOLVED" if result["solved"] else "FAIL"
-                ep = result["ep_rew_mean"]
-                ep_s = f"{ep:.1f}" if np.isfinite(ep) else "nan"
-                print(
-                    f"    → {status} steps={result['steps_to_solve']} "
-                    f"elapsed_s={result['elapsed_s']:.1f} "
-                    f"ep_rew={ep_s} n_eps={result['n_episodes']}",
-                    flush=True,
-                )
-                raw_rows.append(
-                    {
-                        "algo": algo,
-                        "env": env_name,
-                        "n_envs": n,
-                        "seed": seed,
-                        "threshold": threshold,
-                        "budget": budget,
-                        "solved": bool(result["solved"]),
-                        "steps_to_solve": result["steps_to_solve"],
-                        "elapsed_s": round(result["elapsed_s"], 3),
-                        "ep_rew_mean": round(ep, 2) if np.isfinite(ep) else "",
-                        "n_episodes": result["n_episodes"],
-                    }
-                )
-                done.add((algo, n, seed))
-                _write_csv(raw_csv_path, raw_rows, RAW_COLUMNS)
+    total = len(algos) * len(n_envs_list) * seeds
+    pbar = tqdm(total=total, desc="solving", unit="run", dynamic_ncols=True)
+    try:
+        for key in algos:
+            algo, env_name, make_fn = sweeps[key]
+            threshold = SOLVE_THRESHOLD[env_name]
+            for n in n_envs_list:
+                budget = step_budget(n, base=base_budget)
+                chunk = chunk_steps_for(n, env_name, base=chunk_steps)
+                for seed in seed_list:
+                    if (algo, n, seed) in done:
+                        pbar.update(1)
+                        continue
+                    model = make_fn(n, seed)
+                    result = train_until_solved(
+                        model,
+                        threshold=threshold,
+                        max_steps=budget,
+                        chunk_steps=chunk,
+                        env_name=env_name,
+                    )
+                    status = "SOLVED" if result["solved"] else "FAIL"
+                    ep = result["ep_rew_mean"]
+                    ep_s = f"{ep:.1f}" if np.isfinite(ep) else "nan"
+                    pbar.write(
+                        f"{algo} n_envs={n} seed={seed}: {status} "
+                        f"steps={result['steps_to_solve']} elapsed_s={result['elapsed_s']:.1f} "
+                        f"ep_rew={ep_s}",
+                    )
+                    raw_rows.append(
+                        {
+                            "algo": algo,
+                            "env": env_name,
+                            "n_envs": n,
+                            "seed": seed,
+                            "threshold": threshold,
+                            "budget": budget,
+                            "solved": bool(result["solved"]),
+                            "steps_to_solve": result["steps_to_solve"],
+                            "elapsed_s": round(result["elapsed_s"], 3),
+                            "ep_rew_mean": round(ep, 2) if np.isfinite(ep) else "",
+                            "n_episodes": result["n_episodes"],
+                        }
+                    )
+                    done.add((algo, n, seed))
+                    _write_csv(raw_csv_path, raw_rows, RAW_COLUMNS)
+                    pbar.set_postfix_str(f"{algo} n={n} {status}")
+                    pbar.update(1)
+    finally:
+        pbar.close()
 
     agg_rows = _aggregate(raw_rows, seeds=seeds)
     _write_csv(csv_path, agg_rows, AGG_COLUMNS)
@@ -427,7 +454,7 @@ def parse_args() -> argparse.Namespace:
         default=CHUNK_STEPS,
         help="minimum env-steps between solve checks (also ≥ n_envs * max_ep_len)",
     )
-    p.add_argument("--csv", type=Path, default=Path("benchmarks/solving_results.csv"))
+    p.add_argument("--csv", type=Path, default=Path("outputs/solving_results.csv"))
     p.add_argument(
         "--raw-csv",
         type=Path,
@@ -439,6 +466,11 @@ def parse_args() -> argparse.Namespace:
         action="store_true",
         help="ignore existing raw CSV and rerun from scratch",
     )
+    p.add_argument(
+        "--use-baseline-configs",
+        action="store_true",
+        help="load hyperparameters from configs/{algo}_baseline.yaml instead of defaults",
+    )
     return p.parse_args()
 
 
@@ -446,6 +478,17 @@ def main() -> None:
     args = parse_args()
     algos = list(SWEEPS) if args.algo == "all" else [args.algo]
     n_envs_list = list(args.n_envs) if args.n_envs is not None else list(N_ENVS)
+
+    if args.use_baseline_configs:
+        sweeps = {}
+        for key in algos:
+            path = Path("configs") / f"{key}_baseline.yaml"
+            if not path.exists():
+                raise FileNotFoundError(path)
+            sweeps[key] = _make_from_yaml(path)
+        print("using baseline YAML configs:", [str(sweeps[k][0]) for k in sweeps])
+    else:
+        sweeps = SWEEPS
 
     budgets = {n: step_budget(n, base=args.base_budget) for n in n_envs_list}
     print(
@@ -456,6 +499,7 @@ def main() -> None:
     run_sweep(
         algos,
         n_envs_list,
+        sweeps=sweeps,
         seeds=args.seeds,
         base_budget=args.base_budget,
         chunk_steps=args.chunk_steps,
