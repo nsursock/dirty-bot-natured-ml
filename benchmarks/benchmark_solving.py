@@ -150,7 +150,7 @@ def is_solved(model, threshold: float, window: int = SOLVE_WINDOW) -> bool:
     return n >= window and ep_rew >= threshold
 
 
-def _make_ppo(n_envs: int, seed: int) -> PPO:
+def _make_ppo(n_envs: int, seed: int, tensorboard_log: str | None = None) -> PPO:
     # ~2048-step rollouts; floor n_steps so GAE horizon does not collapse to 1.
     n_steps = max(8, 2048 // n_envs) if n_envs < 256 else max(4, 8192 // n_envs)
     env = CartPole(n_envs=n_envs, seed=seed)
@@ -160,12 +160,13 @@ def _make_ppo(n_envs: int, seed: int) -> PPO:
         n_steps=n_steps,
         batch_size=64,
         n_epochs=10,
+        tensorboard_log=tensorboard_log,
         policy_kwargs={"net_arch": (64, 64)},
         seed=seed,
     )
 
 
-def _make_sac(n_envs: int, seed: int) -> SAC:
+def _make_sac(n_envs: int, seed: int, tensorboard_log: str | None = None) -> SAC:
     env = Pendulum(n_envs=n_envs, seed=seed)
     return SAC(
         "MlpPolicy",
@@ -174,12 +175,13 @@ def _make_sac(n_envs: int, seed: int) -> SAC:
         buffer_size=max(100_000, min(1_000_000, n_envs * 50)),
         batch_size=256,
         gradient_steps=1,
+        tensorboard_log=tensorboard_log,
         policy_kwargs={"net_arch": (256, 256)},
         seed=seed,
     )
 
 
-def _make_td3(n_envs: int, seed: int) -> TD3:
+def _make_td3(n_envs: int, seed: int, tensorboard_log: str | None = None) -> TD3:
     env = Pendulum(n_envs=n_envs, seed=seed)
     # One update per transition (UTD=1). Cap so n_envs=8192 does not run
     # thousands of gradient steps on every vector step.
@@ -190,6 +192,7 @@ def _make_td3(n_envs: int, seed: int) -> TD3:
         buffer_size=max(100_000, min(1_000_000, n_envs * 50)),
         batch_size=256,
         gradient_steps=min(n_envs, 32),
+        tensorboard_log=tensorboard_log,
         policy_kwargs={"net_arch": (256, 256)},
         seed=seed,
     )
@@ -200,7 +203,8 @@ def _make_from_yaml(path: Path):
     raw = yaml.safe_load(path.read_text())
     env_name = raw["env"]
     algo = raw["algo"]
-    base_kwargs = {k: v for k, v in raw.items() if k not in {"algo", "env", "n_envs", "seed"}}
+    excluded = {"algo", "env", "n_envs", "seed", "tensorboard_log", "tb_log_name"}
+    base_kwargs = {k: v for k, v in raw.items() if k not in excluded}
     if "policy_kwargs" in base_kwargs and base_kwargs["policy_kwargs"] is not None:
         base_kwargs["policy_kwargs"] = {
             k: tuple(v) if isinstance(v, list) else v
@@ -209,9 +213,16 @@ def _make_from_yaml(path: Path):
     algo_cls = {"PPO": PPO, "SAC": SAC, "TD3": TD3}[algo]
     env_cls = {"CartPole": CartPole, "Pendulum": Pendulum}[env_name]
 
-    def _make(n_envs: int, seed: int):
+    def _make(n_envs: int, seed: int, tensorboard_log: str | None = None):
         env = env_cls(n_envs=n_envs, seed=seed)
-        return algo_cls("MlpPolicy", env, seed=seed, verbose=0, **base_kwargs)
+        return algo_cls(
+            "MlpPolicy",
+            env,
+            seed=seed,
+            verbose=0,
+            tensorboard_log=tensorboard_log,
+            **base_kwargs,
+        )
 
     return algo, env_name, _make
 
@@ -236,6 +247,7 @@ def train_until_solved(
     eval_env=None,
     eval_enabled: bool = True,
     n_eval_episodes: int = 10,
+    tb_log_name: str = "run",
 ) -> dict:
     """Chunked learn(); stop at first gym-solve, hopeless mid-budget, or ``max_steps``."""
     t0 = time.perf_counter()
@@ -245,10 +257,20 @@ def train_until_solved(
     while model.num_timesteps < max_steps:
         target = min(max_steps, model.num_timesteps + chunk_steps)
         if first:
-            model.learn(target, progress_bar=False, reset_num_timesteps=True)
+            model.learn(
+                target,
+                progress_bar=False,
+                reset_num_timesteps=True,
+                tb_log_name=tb_log_name,
+            )
             first = False
         else:
-            model.learn(target, progress_bar=False, reset_num_timesteps=False)
+            model.learn(
+                target,
+                progress_bar=False,
+                reset_num_timesteps=False,
+                tb_log_name=tb_log_name,
+            )
 
         ep_rew, n_eps = _ep_stats(model)
         if eval_enabled and eval_env is not None:
@@ -417,6 +439,7 @@ def run_sweep(
     resume: bool = True,
     eval_enabled: bool = True,
     n_eval_episodes: int = 10,
+    tensorboard_log: str | None = None,
 ) -> list[dict]:
     seed_list = list(range(seeds))
     if raw_csv_path is None:
@@ -440,7 +463,8 @@ def run_sweep(
                     if (algo, n, seed) in done:
                         pbar.update(1)
                         continue
-                    model = make_fn(n, seed)
+                    tb_name = f"{algo}_n{n}_seed{seed}"
+                    model = make_fn(n, seed, tensorboard_log=tensorboard_log)
                     eval_env = ENV_CLS[env_name](n_envs=1, seed=seed + 100_000) if eval_enabled else None
                     result = train_until_solved(
                         model,
@@ -451,6 +475,7 @@ def run_sweep(
                         eval_env=eval_env,
                         eval_enabled=eval_enabled,
                         n_eval_episodes=n_eval_episodes,
+                        tb_log_name=tb_name,
                     )
                     status = "SOLVED" if result["solved"] else "FAIL"
                     ep = result["ep_rew_mean"]
@@ -531,6 +556,12 @@ def parse_args() -> argparse.Namespace:
     )
     p.add_argument("--eval", action=argparse.BooleanOptionalAction, default=True)
     p.add_argument("--n-eval-episodes", type=int, default=10)
+    p.add_argument(
+        "--tensorboard-log",
+        type=str,
+        default="outputs/tensorboard",
+        help="directory for TensorBoard event files and per-run progress.csv",
+    )
     return p.parse_args()
 
 
@@ -568,6 +599,7 @@ def main() -> None:
         resume=not args.no_resume,
         eval_enabled=args.eval,
         n_eval_episodes=args.n_eval_episodes,
+        tensorboard_log=args.tensorboard_log,
     )
 
 
