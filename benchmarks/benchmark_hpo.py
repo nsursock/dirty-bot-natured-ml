@@ -1,7 +1,8 @@
 """Context-aware HPO for PPO / SAC / TD3 — NOT part of pytest CI.
 
-One Optuna study per (algo, n_envs). ``n_envs`` is fixed by the outer loop
-(8, 64, 1024), not sampled, so the pruner never compares different widths.
+One Optuna study per algo. ``n_envs`` is sampled as a categorical
+hyperparameter (4 .. 8192 by doubling), so the search can compare different
+widths and find the configuration that minimizes wall-clock time-to-solve.
 
 ``MedianPruner(interval_steps=1)`` is required. Reports happen at chunk
 boundaries, and those step counts are not multiples of 5000. Any other
@@ -18,7 +19,7 @@ the measured partial run, and the objective is left blank so a short cap
 is not ranked as a fast solve. ``--max-hours 0`` disables the cap.
 
 Run:
-  python benchmarks/benchmark_hpo.py --algo ppo --n-envs 8 --trials 1 --seed 0
+  python benchmarks/benchmark_hpo.py --algo ppo --n-envs 4 8 --trials 1 --seed 0
   python benchmarks/benchmark_hpo.py --algo all --trials 8
 """
 
@@ -39,6 +40,7 @@ from tqdm import tqdm
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 from benchmark_solving import (  # noqa: E402
+    N_ENVS,
     SOLVE_THRESHOLD,
     SOLVE_WINDOW,
     _ep_stats,
@@ -61,7 +63,6 @@ except ImportError:  # pragma: no cover - import guard for missing extra
     MedianPruner = None  # type: ignore[misc, assignment]
 
 OUT_DIR = Path(__file__).resolve().parent.parent / "outputs"
-N_ENVS = (8, 64, 1024)
 DEFAULT_MAX_HOURS = 2.0
 # The scheduler stops starting work this long before the hard cap, so the
 # chunk already in flight still finishes inside the cap.
@@ -70,12 +71,58 @@ N_STARTUP_TRIALS = 3
 # Env-step warmup. ``step`` passed to trial.report is num_timesteps.
 WARMUP_STEPS = {"PPO": 40_000, "SAC": 40_000, "TD3": 60_000}
 BASELINE_EPISODES = 20
-GS_CAP = 32
-PPO_N_STEPS = (8, 32, 128)
-LR_LOW = 1e-4
-LR_HIGH = 3e-3
-LEARNING_STARTS = (1000, 5000, 10_000)
+N_EVAL_EPISODES = 10
 ENVS = {"CartPole": CartPole, "Pendulum": Pendulum}
+
+# SB3-style hyperparameter search ranges.
+LR_LOW = 1e-5
+LR_HIGH = 1e-2
+
+PPO_N_STEPS_OPTIONS = (64, 128, 256, 512, 1024, 2048)
+PPO_BATCH_SIZE_OPTIONS = (32, 64, 128, 256)
+PPO_N_EPOCHS_OPTIONS = (4, 10, 20)
+PPO_GAMMA_RANGE = (0.95, 0.999)
+PPO_GAE_LAMBDA_RANGE = (0.8, 0.99)
+PPO_CLIP_RANGE_RANGE = (0.05, 0.3)
+PPO_ENT_COEF_RANGE = (1e-8, 1e-1)
+PPO_VF_COEF_RANGE = (0.1, 1.0)
+PPO_MAX_GRAD_NORM_RANGE = (0.1, 1.0)
+
+OFFPOLICY_BUFFER_SIZE_OPTIONS = (100_000, 500_000, 1_000_000)
+OFFPOLICY_LEARNING_STARTS_OPTIONS = (100, 1000, 5000, 10_000)
+OFFPOLICY_BATCH_SIZE_OPTIONS = (128, 256, 512)
+OFFPOLICY_TAU_RANGE = (0.001, 0.02)
+OFFPOLICY_GAMMA_RANGE = (0.95, 0.999)
+OFFPOLICY_TRAIN_FREQ_OPTIONS = (1, 2, 4, 8)
+OFFPOLICY_GRADIENT_STEPS_OPTIONS = (1, 2, 4, 8)
+
+TD3_POLICY_DELAY_OPTIONS = (1, 2, 3, 4)
+TD3_TARGET_POLICY_NOISE_RANGE = (0.1, 0.3)
+TD3_TARGET_NOISE_CLIP_RANGE = (0.3, 0.7)
+TD3_ACTION_NOISE_STD_RANGE = (0.05, 0.2)
+
+# Knobs recorded in CSV output (algos share gamma/batch_size keys).
+HYPERPARAM_KNOBS = (
+    "n_steps",
+    "batch_size",
+    "n_epochs",
+    "gamma",
+    "gae_lambda",
+    "clip_range",
+    "ent_coef",
+    "vf_coef",
+    "max_grad_norm",
+    "normalize_advantage",
+    "buffer_size",
+    "learning_starts",
+    "tau",
+    "train_freq",
+    "gradient_steps",
+    "policy_delay",
+    "target_policy_noise",
+    "target_noise_clip",
+    "action_noise_std",
+)
 
 CHUNK_COLUMNS = (
     "algo",
@@ -87,14 +134,10 @@ CHUNK_COLUMNS = (
     "env_steps",
     "wall_clock_s",
     "ep_rew_mean",
+    "eval_ep_rew_mean",
     "chunk_steps",
     "lr",
-    "learning_starts",
-    "gradient_steps_effective",
-    "update_ratio",
-    "n_steps",
-    "rollout",
-)
+) + HYPERPARAM_KNOBS
 
 TRIAL_COLUMNS = (
     "algo",
@@ -108,15 +151,10 @@ TRIAL_COLUMNS = (
     "steps_at_stop",
     "ep_rew_at_stop",
     "objective",
-    "lr",
-    "learning_starts",
-    "gradient_steps_effective",
-    "update_ratio",
-    "n_steps",
-    "rollout",
     "baseline",
     "threshold",
-)
+    "lr",
+) + HYPERPARAM_KNOBS
 
 
 def _blank(x) -> str | int | float:
@@ -168,69 +206,94 @@ def _random_baseline(env_name: str, seed: int, cache_path: Path) -> float:
     return value
 
 
+def _eval_mean_reward(model, env_name: str, seed: int, n_episodes: int) -> float:
+    """Deterministic evaluation on a single fresh env (SB3 EvalCallback style)."""
+    env = ENVS[env_name](n_envs=1, seed=seed)
+    obs, _info = env.reset(seed=seed)
+    returns: list[float] = []
+    while len(returns) < n_episodes:
+        action, _state = model.predict(obs, deterministic=True)
+        obs, _reward, _terminated, _truncated, info = env.step(action)
+        if info and "episode" in info:
+            returns.append(float(info["episode"]["r"]))
+            obs, _info = env.reset()
+    return float(np.mean(returns))
+
+
 def _make_model(algo: str, n_envs: int, seed: int, params: dict):
+    # ``params`` includes sampled hyperparameters, including ``learning_rate``.
+    # ``n_envs`` is handled by constructing the env; it is not passed to the model.
+    model_kwargs = {k: v for k, v in params.items() if k != "n_envs"}
     if algo == "PPO":
-        n_steps = int(params["n_steps"])
         env = CartPole(n_envs=n_envs, seed=seed)
         return PPO(
             "MlpPolicy",
             env,
-            learning_rate=float(params["lr"]),
-            n_steps=n_steps,
-            batch_size=min(64, n_steps * n_envs),
-            n_epochs=10,
-            policy_kwargs={"net_arch": (64, 64)},
             seed=seed,
+            policy_kwargs={"net_arch": (64, 64)},
+            **model_kwargs,
         )
     env = Pendulum(n_envs=n_envs, seed=seed)
-    common = dict(
-        learning_rate=float(params["lr"]),
-        learning_starts=int(params["learning_starts"]),
-        buffer_size=max(100_000, min(1_000_000, n_envs * 50)),
-        batch_size=256,
-        gradient_steps=int(params["gradient_steps"]),
-        policy_kwargs={"net_arch": (256, 256)},
+    return (SAC if algo == "SAC" else TD3)(
+        "MlpPolicy",
+        env,
         seed=seed,
+        policy_kwargs={"net_arch": (256, 256)},
+        **model_kwargs,
     )
-    if algo == "SAC":
-        return SAC("MlpPolicy", env, **common)
-    return TD3("MlpPolicy", env, **common)
 
 
-def _sample(trial, algo: str, n_envs: int) -> dict:
-    lr = float(trial.suggest_float("learning_rate", LR_LOW, LR_HIGH, log=True))
-    if algo == "PPO":
-        n_steps = int(trial.suggest_categorical("n_steps", list(PPO_N_STEPS)))
-        return {
-            "lr": lr,
-            "learning_starts": None,
-            "gradient_steps": None,
-            "update_ratio": None,
-            "n_steps": n_steps,
-            "rollout": n_steps * n_envs,
-        }
-    high = min(GS_CAP, n_envs)
-    gradient_steps = int(trial.suggest_int("gradient_steps", 1, high, log=True))
-    starts = int(trial.suggest_categorical("learning_starts", list(LEARNING_STARTS)))
-    return {
-        "lr": lr,
-        "learning_starts": max(starts, n_envs),
-        "gradient_steps": gradient_steps,
-        "update_ratio": gradient_steps / n_envs,
-        "n_steps": None,
-        "rollout": None,
+def _sample(trial, algo: str, n_envs_choices: tuple[int, ...]) -> dict:
+    params: dict[str, Any] = {
+        "learning_rate": float(trial.suggest_float("learning_rate", LR_LOW, LR_HIGH, log=True)),
+        "n_envs": int(trial.suggest_categorical("n_envs", list(n_envs_choices))),
     }
+    if algo == "PPO":
+        params.update(
+            {
+                "n_steps": int(trial.suggest_categorical("n_steps", list(PPO_N_STEPS_OPTIONS))),
+                "batch_size": int(trial.suggest_categorical("batch_size", list(PPO_BATCH_SIZE_OPTIONS))),
+                "n_epochs": int(trial.suggest_categorical("n_epochs", list(PPO_N_EPOCHS_OPTIONS))),
+                "gamma": float(trial.suggest_float("gamma", *PPO_GAMMA_RANGE)),
+                "gae_lambda": float(trial.suggest_float("gae_lambda", *PPO_GAE_LAMBDA_RANGE)),
+                "clip_range": float(trial.suggest_float("clip_range", *PPO_CLIP_RANGE_RANGE)),
+                "ent_coef": float(trial.suggest_float("ent_coef", *PPO_ENT_COEF_RANGE, log=True)),
+                "vf_coef": float(trial.suggest_float("vf_coef", *PPO_VF_COEF_RANGE)),
+                "max_grad_norm": float(trial.suggest_float("max_grad_norm", *PPO_MAX_GRAD_NORM_RANGE)),
+                "normalize_advantage": bool(
+                    trial.suggest_categorical("normalize_advantage", [True, False])
+                ),
+            }
+        )
+    else:
+        params.update(
+            {
+                "buffer_size": int(trial.suggest_categorical("buffer_size", list(OFFPOLICY_BUFFER_SIZE_OPTIONS))),
+                "learning_starts": int(trial.suggest_categorical("learning_starts", list(OFFPOLICY_LEARNING_STARTS_OPTIONS))),
+                "batch_size": int(trial.suggest_categorical("batch_size", list(OFFPOLICY_BATCH_SIZE_OPTIONS))),
+                "tau": float(trial.suggest_float("tau", *OFFPOLICY_TAU_RANGE, log=True)),
+                "gamma": float(trial.suggest_float("gamma", *OFFPOLICY_GAMMA_RANGE)),
+                "train_freq": int(trial.suggest_categorical("train_freq", list(OFFPOLICY_TRAIN_FREQ_OPTIONS))),
+                "gradient_steps": int(trial.suggest_categorical("gradient_steps", list(OFFPOLICY_GRADIENT_STEPS_OPTIONS))),
+            }
+        )
+        if algo == "TD3":
+            params.update(
+                {
+                    "policy_delay": int(trial.suggest_categorical("policy_delay", list(TD3_POLICY_DELAY_OPTIONS))),
+                    "target_policy_noise": float(trial.suggest_float("target_policy_noise", *TD3_TARGET_POLICY_NOISE_RANGE)),
+                    "target_noise_clip": float(trial.suggest_float("target_noise_clip", *TD3_TARGET_NOISE_CLIP_RANGE)),
+                    "action_noise_std": float(trial.suggest_float("action_noise_std", *TD3_ACTION_NOISE_STD_RANGE)),
+                }
+            )
+    return params
 
 
 def _knobs(params: dict) -> dict:
-    return {
-        "lr": params["lr"],
-        "learning_starts": _blank(params["learning_starts"]),
-        "gradient_steps_effective": _blank(params["gradient_steps"]),
-        "update_ratio": _blank(params["update_ratio"]),
-        "n_steps": _blank(params["n_steps"]),
-        "rollout": _blank(params["rollout"]),
-    }
+    knobs = {"lr": params["learning_rate"]}
+    for k in HYPERPARAM_KNOBS:
+        knobs[k] = _blank(params.get(k))
+    return knobs
 
 
 class _WallClock:
@@ -264,7 +327,7 @@ def _run_trial(
     *,
     algo: str,
     env_name: str,
-    n_envs: int,
+    n_envs_choices: tuple[int, ...],
     seed: int,
     baseline: float,
     threshold: float,
@@ -272,7 +335,8 @@ def _run_trial(
     trial_csv: Path,
     trial_deadline: float,
 ) -> float:
-    params = _sample(trial, algo, n_envs)
+    params = _sample(trial, algo, n_envs_choices)
+    n_envs = int(params["n_envs"])
     model = _make_model(algo, n_envs, seed, params)
     budget = step_budget(n_envs)
     chunk = chunk_steps_for(n_envs, env_name)
@@ -308,10 +372,12 @@ def _run_trial(
             )
             first = False
             ep_rew, _n_eps = _ep_stats(model)
+            # SB3-style early stopping: deterministic eval on a fresh env.
+            eval_rew = _eval_mean_reward(model, env_name, seed, N_EVAL_EPISODES)
             elapsed = time.perf_counter() - t0
             bar.update(max(0, int(model.num_timesteps) - steps_at_start))
-            bar.set_postfix(rew=f"{ep_rew:.1f}" if np.isfinite(ep_rew) else "-")
-            progress = _progress(ep_rew, baseline, threshold)
+            bar.set_postfix(rew=f"{eval_rew:.1f}" if np.isfinite(eval_rew) else "-")
+            progress = _progress(eval_rew, baseline, threshold)
             _append_csv(
                 chunk_csv,
                 {
@@ -324,6 +390,7 @@ def _run_trial(
                     "env_steps": int(model.num_timesteps),
                     "wall_clock_s": round(elapsed, 4),
                     "ep_rew_mean": _blank(ep_rew if np.isfinite(ep_rew) else None),
+                    "eval_ep_rew_mean": _blank(eval_rew if np.isfinite(eval_rew) else None),
                     "chunk_steps": chunk,
                     **knobs,
                 },
@@ -331,8 +398,9 @@ def _run_trial(
             )
             # Lower is better: the study minimizes solve time, so progress is negated.
             trial.report(-progress, int(model.num_timesteps))
-            if is_solved(model, threshold, window=SOLVE_WINDOW):
+            if eval_rew >= threshold:
                 solved = True
+                ep_rew = eval_rew
                 break
             if trial.should_prune():
                 pruned = True
@@ -341,11 +409,16 @@ def _run_trial(
     finally:
         bar.close()
         elapsed = time.perf_counter() - t0
+        steps_at_stop = int(model.num_timesteps)
         objective: float | str
         if pruned or time_capped:
             objective = ""
-        else:
+        elif solved:
             objective = round(elapsed, 4)
+        else:
+            # Penalize unsolved trials by extrapolating elapsed time to the full budget.
+            per_step = elapsed / max(steps_at_stop, 1)
+            objective = round(elapsed + max(0, budget - steps_at_stop) * per_step, 4)
         _append_csv(
             trial_csv,
             {
@@ -357,7 +430,7 @@ def _run_trial(
                 "pruned": int(pruned),
                 "time_capped": int(time_capped),
                 "elapsed_s": round(elapsed, 4),
-                "steps_at_stop": int(model.num_timesteps),
+                "steps_at_stop": steps_at_stop,
                 "ep_rew_at_stop": _blank(ep_rew if np.isfinite(ep_rew) else None),
                 "objective": objective,
                 "baseline": baseline,
@@ -372,13 +445,13 @@ def _run_trial(
 
     if time_capped:
         raise TrialPruned()
-    return elapsed
+    return float(objective)
 
 
 def run_cell(
     algo: str,
     env_name: str,
-    n_envs: int,
+    n_envs_choices: tuple[int, ...],
     *,
     n_trials: int,
     seed: int,
@@ -394,7 +467,7 @@ def run_cell(
         )
     threshold = SOLVE_THRESHOLD[env_name]
     baseline = _random_baseline(env_name, seed, baseline_path)
-    db_path = OUT_DIR / f"hpo_{algo}_{n_envs}.db"
+    db_path = OUT_DIR / f"hpo_{algo}_sb3.db"
     db_path.parent.mkdir(parents=True, exist_ok=True)
     storage = "sqlite:///" + urllib.parse.quote(db_path.as_posix(), safe="/")
     pruner = MedianPruner(
@@ -404,13 +477,12 @@ def run_cell(
         interval_steps=1,
     )
     study = optuna.create_study(
-        study_name=f"hpo_{algo}_{n_envs}",
+        study_name=f"hpo_{algo}_sb3",
         storage=storage,
         load_if_exists=True,
         direction="minimize",
         pruner=pruner,
     )
-    study.set_user_attr("n_envs", n_envs)
     study.set_user_attr("threshold", threshold)
     study.set_user_attr("algo", algo)
 
@@ -420,8 +492,8 @@ def run_cell(
             f"(n_startup_trials={N_STARTUP_TRIALS}). This checks the loop only."
         )
     tqdm.write(
-        f"{algo} {env_name} n_envs={n_envs} trials={n_trials} seed={seed} "
-        f"baseline={baseline:.2f} threshold={threshold} budget={step_budget(n_envs)}"
+        f"{algo} {env_name} trials={n_trials} seed={seed} "
+        f"baseline={baseline:.2f} threshold={threshold} n_envs in {list(n_envs_choices)}"
     )
 
     deadline_s = {"t": float("inf")}
@@ -431,7 +503,7 @@ def run_cell(
             trial,
             algo=algo,
             env_name=env_name,
-            n_envs=n_envs,
+            n_envs_choices=n_envs_choices,
             seed=seed,
             baseline=baseline,
             threshold=threshold,
@@ -442,10 +514,10 @@ def run_cell(
 
     for _ in range(n_trials):
         if clock.expired():
-            tqdm.write(f"wall clock: stopping before {algo} n_envs={n_envs}")
+            tqdm.write(f"wall clock: stopping before {algo}")
             return True
         deadline_s["t"] = clock.trial_deadline()
-        grid.set_postfix_str(f"{algo} n={n_envs}")
+        grid.set_postfix_str(f"{algo}")
         n_before = len(study.trials)
         try:
             study.optimize(objective, n_trials=1)
@@ -462,7 +534,7 @@ def run_cell(
                 else:
                     tag = "budget"
                 rew = last.user_attrs.get("ep_rew", "-")
-                grid.set_postfix_str(f"{algo} n={n_envs} {tag} rew={rew}")
+                grid.set_postfix_str(f"{algo} {tag} rew={rew}")
                 grid.update(1)
     return False
 
@@ -470,7 +542,13 @@ def run_cell(
 def parse_args() -> argparse.Namespace:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--algo", choices=["ppo", "sac", "td3", "all"], default="all")
-    p.add_argument("--n-envs", type=int, nargs="+", default=list(N_ENVS))
+    p.add_argument(
+        "--n-envs",
+        type=int,
+        nargs="+",
+        default=list(N_ENVS),
+        help="candidate n_envs values to sample from (default: 4..8192 by doubling)",
+    )
     p.add_argument("--trials", type=int, default=8)
     p.add_argument("--seed", type=int, default=0)
     p.add_argument(
@@ -479,8 +557,8 @@ def parse_args() -> argparse.Namespace:
         default=DEFAULT_MAX_HOURS,
         help="stop the grid at this wall-clock cap (0 disables it)",
     )
-    p.add_argument("--chunk-csv", type=Path, default=OUT_DIR / "hpo_chunks.csv")
-    p.add_argument("--trial-csv", type=Path, default=OUT_DIR / "hpo_trials.csv")
+    p.add_argument("--chunk-csv", type=Path, default=OUT_DIR / "hpo_sb3_chunks.csv")
+    p.add_argument("--trial-csv", type=Path, default=OUT_DIR / "hpo_sb3_trials.csv")
     p.add_argument("--baseline-cache", type=Path, default=OUT_DIR / "hpo_baselines.json")
     return p.parse_args()
 
@@ -491,7 +569,8 @@ def main() -> None:
         optuna.logging.set_verbosity(optuna.logging.WARNING)
     algos = ["ppo", "sac", "td3"] if args.algo == "all" else [args.algo]
     names = {"ppo": ("PPO", "CartPole"), "sac": ("SAC", "Pendulum"), "td3": ("TD3", "Pendulum")}
-    n_total = len(algos) * len(args.n_envs) * args.trials
+    n_envs_choices = tuple(args.n_envs)
+    n_total = len(algos) * args.trials
     clock = _WallClock(args.max_hours, n_total)
     if args.max_hours > 0:
         tqdm.write(f"wall-clock cap: {args.max_hours:g}h")
@@ -499,24 +578,23 @@ def main() -> None:
     try:
         for key in algos:
             algo, env_name = names[key]
-            for n in args.n_envs:
-                if clock.expired():
-                    tqdm.write("wall clock: not starting further cells")
-                    return
-                stopped = run_cell(
-                    algo,
-                    env_name,
-                    n,
-                    n_trials=args.trials,
-                    seed=args.seed,
-                    chunk_csv=args.chunk_csv,
-                    trial_csv=args.trial_csv,
-                    baseline_path=args.baseline_cache,
-                    clock=clock,
-                    grid=grid,
-                )
-                if stopped:
-                    return
+            if clock.expired():
+                tqdm.write("wall clock: not starting further cells")
+                return
+            stopped = run_cell(
+                algo,
+                env_name,
+                n_envs_choices,
+                n_trials=args.trials,
+                seed=args.seed,
+                chunk_csv=args.chunk_csv,
+                trial_csv=args.trial_csv,
+                baseline_path=args.baseline_cache,
+                clock=clock,
+                grid=grid,
+            )
+            if stopped:
+                return
     finally:
         grid.close()
 

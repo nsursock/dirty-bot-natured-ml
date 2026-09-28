@@ -22,8 +22,18 @@ _THETA_THRESHOLD = 12 * 2 * math.pi / 360
 _X_THRESHOLD = 2.4
 
 
-def _cartpole_step(state: mx.array, action: mx.array) -> tuple[mx.array, mx.array, mx.array]:
-    """Vectorized dynamics. state (N,4), action (N,) int → next_state, reward, terminated."""
+def _cartpole_step_reset(
+    state: mx.array,
+    action: mx.array,
+    steps: mx.array,
+    fresh: mx.array,
+    max_steps: mx.array,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    """Fused vectorized dynamics + truncation + auto-reset.
+
+    state (N,4), action (N,) int, steps (N,) int, fresh (N,4).
+    Returns next_state, reward, terminated, truncated, done, steps_after_reset.
+    """
     x, x_dot, theta, theta_dot = state[:, 0], state[:, 1], state[:, 2], state[:, 3]
     force = mx.where(action == 1, _FORCE_MAG, -_FORCE_MAG)
     costheta = mx.cos(theta)
@@ -43,11 +53,19 @@ def _cartpole_step(state: mx.array, action: mx.array) -> tuple[mx.array, mx.arra
         | (mx.abs(theta) > _THETA_THRESHOLD)
     ).astype(mx.float32)
     reward = mx.ones((state.shape[0],), dtype=mx.float32)
-    return next_state, reward, terminated
+
+    steps = steps + 1
+    truncated = (steps >= max_steps).astype(mx.float32) * (1.0 - terminated)
+    done = ((terminated + truncated) > 0).astype(mx.float32)
+
+    mask = done[:, None]
+    next_state = next_state * (1.0 - mask) + fresh * mask
+    steps = mx.where(done > 0, mx.zeros_like(steps), steps)
+    return next_state, reward, terminated, truncated, done, steps
 
 
-# Fuse + compile dynamics for repeated steps (vectorized over envs).
-_step_compiled = mx.compile(_cartpole_step)
+# Fuse + compile dynamics, truncation, and auto-reset for repeated steps.
+_step_reset_compiled = mx.compile(_cartpole_step_reset)
 
 
 _EMPTY_INFO: dict = {}
@@ -106,18 +124,22 @@ class CartPole:
     def step(self, action):
         a = np.atleast_1d(np.asarray(action, dtype=np.int32)).reshape(self.n_envs)
         action_mx = mx.array(a)
-        next_state, reward, terminated = _step_compiled(self._state, action_mx)
-        self._steps = self._steps + 1
-        truncated = (self._steps >= self.max_episode_steps).astype(mx.float32)
-        # don't truncate if already terminated
-        truncated = truncated * (1.0 - terminated)
-        done = ((terminated + truncated) > 0).astype(mx.float32)
-
-        mx.eval(next_state, reward, terminated, truncated, done)
+        # Sample fresh states now so the compiled kernel can auto-reset in one graph.
+        fresh = self._sample_state()
+        next_state, reward, terminated, truncated, done, steps = _step_reset_compiled(
+            self._state,
+            action_mx,
+            self._steps,
+            fresh,
+            mx.array(self.max_episode_steps),
+        )
+        self._steps = steps
+        mx.eval(next_state, reward, terminated, truncated, done, self._steps)
+        obs = np.array(next_state, dtype=np.float32)
         rew_np = np.array(reward, dtype=np.float32)
-        term_np = np.array(terminated) > 0
-        trunc_np = np.array(truncated) > 0
-        done_np = np.array(done) > 0
+        term_np = np.array(terminated, dtype=np.float32) > 0
+        trunc_np = np.array(truncated, dtype=np.float32) > 0
+        done_np = np.array(done, dtype=np.float32) > 0
 
         self._ep_ret += rew_np
         self._ep_len += 1
@@ -139,16 +161,7 @@ class CartPole:
                 self._ep_ret[done_np] = 0.0
                 self._ep_len[done_np] = 0
 
-        # auto-reset finished envs (VecEnv-style)
-        if np.any(done_np):
-            fresh = self._sample_state()
-            mask = mx.array(done_np.astype(np.float32))[:, None]
-            next_state = next_state * (1.0 - mask) + fresh * mask
-            self._steps = mx.where(mx.array(done_np), mx.zeros_like(self._steps), self._steps)
-            mx.eval(next_state, self._steps)
-
         self._state = next_state
-        obs = np.array(self._state, dtype=np.float32)
 
         if self.n_envs == 1:
             return obs[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos

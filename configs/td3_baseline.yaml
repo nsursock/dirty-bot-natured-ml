@@ -1,0 +1,20 @@
+# Verified TD3 baseline for Pendulum from update-intensity diagnostic.
+# Robust at the relaxed solve threshold of -200 across 5 seeds.
+algo: TD3
+env: Pendulum
+n_envs: 128
+train_freq: 8
+gradient_steps: 16
+learning_rate: 0.003
+batch_size: 128
+buffer_size: 1000000
+learning_starts: 10000
+gamma: 0.997
+tau: 0.015
+policy_delay: 3
+target_policy_noise: 0.12
+target_noise_clip: 0.514
+action_noise_std: 0.085
+policy_kwargs:
+  net_arch: [256, 256]
+seed: 0

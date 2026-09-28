@@ -31,6 +31,7 @@ from pathlib import Path
 import mlx.core as mx
 import numpy as np
 from tabulate import tabulate
+from tqdm import tqdm
 
 from dbn.reinforcement.algos.ppo import PPO
 from dbn.reinforcement.algos.sac import SAC
@@ -493,43 +494,46 @@ def run_sweep(
 ) -> list[dict]:
     raw_rows: list[dict] = []
     seed_list = list(range(seeds))
+    total = len(algos) * len(n_envs_list) * seeds
+    pbar = tqdm(total=total, desc="scaling", unit="run", dynamic_ncols=True)
 
-    for key in algos:
-        algo, env_name, fn = SWEEPS[key]
-        for n in n_envs_list:
-            env_fps = measure_env_fps(env_name, n, min_seconds=min_seconds)
-            for seed in seed_list:
-                print(
-                    f"  {algo} n_envs={n} seed={seed} (min {min_seconds:.1f}s) ...",
-                    flush=True,
-                )
-                train_fps, done_steps, elapsed, sys_m = fn(
-                    n,
-                    steps=steps,
-                    seed=seed,
-                    sample_gpu=sample_gpu,
-                    min_seconds=min_seconds,
-                )
-                raw_rows.append(
-                    {
-                        "algo": algo,
-                        "env": env_name,
-                        "n_envs": n,
-                        "seed": seed,
-                        "steps": int(done_steps),
-                        "elapsed_s": round(elapsed, 4),
-                        "train_fps": round(train_fps, 1),
-                        "env_fps": round(env_fps, 1),
-                        "train_fps_per_env": round(train_fps / n, 1),
-                        "env_fps_per_env": round(env_fps / n, 1),
-                        "cpu_util_pct": _round_or_blank(sys_m.get("cpu_util_pct"), 1),
-                        "gpu_util_pct": _round_or_blank(sys_m.get("gpu_util_pct"), 1),
-                        "gpu_power_w": _round_or_blank(sys_m.get("gpu_power_w"), 3),
-                        "gpu_mem_mb": _round_or_blank(sys_m.get("gpu_mem_mb"), 1),
-                        "cpu_temp_c": _round_or_blank(sys_m.get("cpu_temp_c"), 1),
-                        "gpu_temp_c": _round_or_blank(sys_m.get("gpu_temp_c"), 1),
-                    }
-                )
+    try:
+        for key in algos:
+            algo, env_name, fn = SWEEPS[key]
+            for n in n_envs_list:
+                env_fps = measure_env_fps(env_name, n, min_seconds=min_seconds)
+                for seed in seed_list:
+                    train_fps, done_steps, elapsed, sys_m = fn(
+                        n,
+                        steps=steps,
+                        seed=seed,
+                        sample_gpu=sample_gpu,
+                        min_seconds=min_seconds,
+                    )
+                    raw_rows.append(
+                        {
+                            "algo": algo,
+                            "env": env_name,
+                            "n_envs": n,
+                            "seed": seed,
+                            "steps": int(done_steps),
+                            "elapsed_s": round(elapsed, 4),
+                            "train_fps": round(train_fps, 1),
+                            "env_fps": round(env_fps, 1),
+                            "train_fps_per_env": round(train_fps / n, 1),
+                            "env_fps_per_env": round(env_fps / n, 1),
+                            "cpu_util_pct": _round_or_blank(sys_m.get("cpu_util_pct"), 1),
+                            "gpu_util_pct": _round_or_blank(sys_m.get("gpu_util_pct"), 1),
+                            "gpu_power_w": _round_or_blank(sys_m.get("gpu_power_w"), 3),
+                            "gpu_mem_mb": _round_or_blank(sys_m.get("gpu_mem_mb"), 1),
+                            "cpu_temp_c": _round_or_blank(sys_m.get("cpu_temp_c"), 1),
+                            "gpu_temp_c": _round_or_blank(sys_m.get("gpu_temp_c"), 1),
+                        }
+                    )
+                    pbar.set_postfix_str(f"{algo} n={n} seed={seed} fps={train_fps:.0f}")
+                    pbar.update(1)
+    finally:
+        pbar.close()
 
     if raw_csv_path is None:
         raw_csv_path = csv_path.with_name(csv_path.stem + "_raw.csv")

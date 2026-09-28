@@ -23,8 +23,18 @@ def _angle_normalize(theta: mx.array) -> mx.array:
     return theta - two_pi * mx.floor((theta + math.pi) / two_pi)
 
 
-def _pendulum_step(state: mx.array, action: mx.array) -> tuple[mx.array, mx.array]:
-    """state (N,2)=[theta, theta_dot], action (N,1) → next_state, reward."""
+def _pendulum_step_reset(
+    state: mx.array,
+    action: mx.array,
+    steps: mx.array,
+    fresh: mx.array,
+    max_steps: mx.array,
+) -> tuple[mx.array, mx.array, mx.array, mx.array, mx.array, mx.array]:
+    """Fused vectorized dynamics + truncation + auto-reset + obs projection.
+
+    state (N,2)=[theta, theta_dot], action (N,1), steps (N,) int, fresh (N,2).
+    Returns obs, next_state, reward, truncated, done, steps_after_reset.
+    """
     theta, theta_dot = state[:, 0], state[:, 1]
     u = mx.clip(action[:, 0], -_MAX_TORQUE, _MAX_TORQUE)
     # Cost uses the wrapped angle. State stays unwrapped so dynamics stay continuous.
@@ -35,10 +45,22 @@ def _pendulum_step(state: mx.array, action: mx.array) -> tuple[mx.array, mx.arra
     new_dot = mx.clip(new_dot, -_MAX_SPEED, _MAX_SPEED)
     new_theta = theta + new_dot * _DT
     next_state = mx.stack([new_theta, new_dot], axis=-1)
-    return next_state, reward
+
+    steps = steps + 1
+    truncated = (steps >= max_steps).astype(mx.float32)
+    done = truncated
+
+    mask = done[:, None]
+    next_state = next_state * (1.0 - mask) + fresh * mask
+    steps = mx.where(done > 0, mx.zeros_like(steps), steps)
+
+    # Project next_state to observation space in the same graph.
+    theta_out, theta_dot_out = next_state[:, 0], next_state[:, 1]
+    obs = mx.stack([mx.cos(theta_out), mx.sin(theta_out), theta_dot_out], axis=-1)
+    return obs, next_state, reward, truncated, done, steps
 
 
-_step_compiled = mx.compile(_pendulum_step)
+_step_reset_compiled = mx.compile(_pendulum_step_reset)
 
 
 def _obs_from_state(state: mx.array) -> mx.array:
@@ -103,17 +125,21 @@ class Pendulum:
         elif a.ndim == 1:
             a = a.reshape(self.n_envs, 1)
         action_mx = mx.array(a)
-        next_state, reward = _step_compiled(self._state, action_mx)
-        # keep θ unwrapped for dynamics continuity (obs uses cos/sin)
-        self._steps = self._steps + 1
-        truncated = (self._steps >= self.max_episode_steps).astype(mx.float32)
-        terminated = mx.zeros((self.n_envs,), dtype=mx.float32)  # no early terminate
-        done = truncated
-
-        mx.eval(next_state, reward, done)
+        # Sample fresh states now so the compiled kernel can auto-reset in one graph.
+        fresh = self._sample_state()
+        obs, next_state, reward, truncated, done, steps = _step_reset_compiled(
+            self._state,
+            action_mx,
+            self._steps,
+            fresh,
+            mx.array(self.max_episode_steps),
+        )
+        self._steps = steps
+        mx.eval(obs, next_state, reward, truncated, done, self._steps)
+        obs_np = np.array(obs, dtype=np.float32)
         rew_np = np.array(reward, dtype=np.float32)
-        trunc_np = np.array(truncated) > 0
-        done_np = np.array(done) > 0
+        trunc_np = np.array(truncated, dtype=np.float32) > 0
+        done_np = np.array(done, dtype=np.float32) > 0
         term_np = np.zeros(self.n_envs, dtype=bool)
 
         self._ep_ret += rew_np
@@ -135,16 +161,8 @@ class Pendulum:
                 self._ep_ret[done_np] = 0.0
                 self._ep_len[done_np] = 0
 
-        if np.any(done_np):
-            fresh = self._sample_state()
-            mask = mx.array(done_np.astype(np.float32))[:, None]
-            next_state = next_state * (1.0 - mask) + fresh * mask
-            self._steps = mx.where(mx.array(done_np), mx.zeros_like(self._steps), self._steps)
-            mx.eval(next_state, self._steps)
-
         self._state = next_state
-        obs = np.array(_obs_from_state(self._state), dtype=np.float32)
 
         if self.n_envs == 1:
-            return obs[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos
-        return obs, rew_np, term_np, trunc_np, infos
+            return obs_np[0], float(rew_np[0]), bool(term_np[0]), bool(trunc_np[0]), infos
+        return obs_np, rew_np, term_np, trunc_np, infos
